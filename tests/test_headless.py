@@ -5,12 +5,15 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from antigravity_local_mcp import headless as hl, windows
 from antigravity_local_mcp.errors import BridgeError
+from antigravity_local_mcp.platforms import process_running
 
 if __package__:
     from . import fake_agy_headless as fake
@@ -246,13 +249,45 @@ class RunTests(unittest.TestCase):
         self.assertFalse(any(t.is_alive() for t in run._threads))
 
     def test_inherited_output_pipes_close_after_parent_exits(self):
+        self.check_inherited_pipes(escaped=False)
+
+    def test_inherited_pipe_fixture_cleans_up_a_surviving_helper(self):
+        def check_before_directory_removal():
+            pid = int((self.root / "pipes.pid").read_text(encoding="ascii"))
+            self.assertFalse(process_running(pid), "Fixture helper outlived test cleanup")
+        self.addCleanup(check_before_directory_removal)
+        self.check_inherited_pipes(escaped=True)
+
+    def check_inherited_pipes(self, *, escaped):
+        hold = self.root / "pipes.hold"
+        hold.touch()
+        self.env["FAKE_AGY_PIPE_HOLD"] = str(hold)
+        pid_file = hold.with_suffix(".pid")
         terminal = threading.Event()
+        def stop_helper():
+            hold.unlink(missing_ok=True)
+            if pid_file.exists():
+                pid = int(pid_file.read_text(encoding="ascii"))
+                deadline = time.monotonic() + 5
+                while process_running(pid):
+                    if time.monotonic() >= deadline:
+                        self.fail(f"Fixture helper {pid} still holds its working directory")
+                    time.sleep(0.02)
+        # Registered before launch so the fake root exits before we inspect its PID file,
+        # including on assertion failure. The temporary directory is removed last.
+        self.addCleanup(stop_helper)
         with patch.object(hl, "_DRAIN_GRACE", 5):
             run = self.launch("#fake:inherited-pipes", on_event=lambda e: terminal.set() if e["kind"] == "result" else None)
             self.assertTrue(terminal.wait(5))
-            result = run.wait(0.4)
-        self.assertEqual(result["result"]["status"], "SUCCESS")
-        self.assertFalse(any(t.is_alive() for t in run._threads))
+            run._process.wait(timeout=5)
+            pid = int(pid_file.read_text(encoding="ascii"))
+            # Exercise a helper outside the bridge's tree on every host.
+            with patch.object(run, "_kill_tree") if escaped else nullcontext():
+                result = run.wait(0.4)
+            self.assertEqual(result["result"]["status"], "SUCCESS")
+            self.assertFalse(any(t.is_alive() for t in run._threads))
+            if escaped:
+                self.assertTrue(process_running(pid))
 
     def test_posix_interrupt_escalates_if_child_ignores_signal(self):
         if sys.platform == "win32":

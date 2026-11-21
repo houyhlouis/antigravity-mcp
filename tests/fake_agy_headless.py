@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -129,9 +130,10 @@ def _turn(options, prompt, interrupted):
     if "crash" in directives:
         os._exit(17)
     if "inherited-pipes" in directives:
-        # Exercise a descendant that holds pipe handles after the turn exits.
-        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)"],
-                         stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+        hold = Path(os.environ["FAKE_AGY_PIPE_HOLD"])
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--fixture-hold-pipes", str(hold)],
+                                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+        hold.with_suffix(".pid").write_text(str(child.pid), encoding="ascii")
 
     def step(index, kind, state="DONE", **fields):
         _emit({"event": "step_update", "step_update": {"conversation_id": cid, "step_index": start + index,
@@ -214,6 +216,12 @@ def _turn(options, prompt, interrupted):
 
 def main(argv):
     argv = list(argv)
+    if len(argv) == 2 and argv[0] == "--fixture-hold-pipes":
+        hold = Path(argv[1])
+        deadline = time.monotonic() + 15
+        while hold.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return 0
     _log({"argv": argv, "cwd": os.getcwd()})
     if argv == ["--version"]:
         print(os.environ.get("FAKE_AGY_VERSION", "1.5.13"))

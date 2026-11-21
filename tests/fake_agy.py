@@ -196,7 +196,8 @@ class Fake:
                 pair[1].append(msg.get("result", {}))
                 pair[0].set()
         elif method == "initialize":
-            offered = os.getenv("FAKE_AGY_PROMPT_CAPS", "image,embeddedContext").split(",")
+            configured = os.getenv("FAKE_AGY_PROMPT_CAPS") or "image,embeddedContext"
+            offered = [] if configured == "none" else configured.split(",")
             caps = {"promptCapabilities": {k: k in offered for k in ("image", "audio", "embeddedContext")},
                     "sessionCapabilities": self.session_caps, "session_capabilities": self.session_caps,
                     "loadSession": "load" in self.session_caps, "load_session": "load" in self.session_caps}

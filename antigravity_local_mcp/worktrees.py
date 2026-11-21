@@ -119,10 +119,6 @@ class _WinAccess:
         advapi.GetNamedSecurityInfoW.restype = w.DWORD
         advapi.ConvertSidToStringSidW.argtypes = (ptr, ctypes.POINTER(w.LPWSTR))
         advapi.GetAce.argtypes = (ptr, w.DWORD, out)
-        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (w.LPCWSTR, w.DWORD, out, ptr)
-        advapi.GetSecurityDescriptorDacl.argtypes = (ptr, ctypes.POINTER(w.BOOL), out, ctypes.POINTER(w.BOOL))
-        advapi.SetNamedSecurityInfoW.argtypes = (w.LPWSTR, ctypes.c_int, w.DWORD, ptr, ptr, ptr, ptr)
-        advapi.SetNamedSecurityInfoW.restype = w.DWORD
         token = w.HANDLE()
         self.check(advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, ctypes.byref(token)))
         try:
@@ -165,20 +161,6 @@ class _WinAccess:
                 mask = ctypes.c_uint32.from_address(ace.value + 4).value
                 if private or mask & 0x500D0156:
                     self.check(self.sid_text(ace.value + 8) in trusted)
-        finally:
-            self.kernel.LocalFree(desc)
-
-    def protect_new_directory(self, path):
-        from ctypes import wintypes as w
-        self.verify(path)
-        desc, acl = ctypes.c_void_p(), ctypes.c_void_p()
-        sddl = f"D:P(A;OICI;GA;;;{self.user})(A;OICI;GA;;;SY)"
-        self.check(self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(desc), None))
-        try:
-            present, defaulted = w.BOOL(), w.BOOL()
-            self.check(self.advapi.GetSecurityDescriptorDacl(desc, ctypes.byref(present), ctypes.byref(acl),
-                                                             ctypes.byref(defaulted)))
-            self.check(self.advapi.SetNamedSecurityInfoW(str(path), 1, 0x80000004, None, None, acl, None) == 0)
         finally:
             self.kernel.LocalFree(desc)
 
@@ -644,7 +626,8 @@ class WorktreeHelper:
             pass
         else:
             if sys.platform == "win32":
-                _win_access().protect_new_directory(path)
+                from .windows import protect_directory
+                protect_directory(path, newly_created=True)
         info = _owned(path)
         if sys.platform == "win32":
             _win_access().verify(path, private=True)

@@ -73,15 +73,18 @@ python3 scripts/live_smoke.py --dry-run          # the same checks against the s
 
 The script uses a temporary project and state folder, caps the run at 12 model turns, records the remaining quota before and after (unless `usage` is skipped), and enables `approval_relay` only in its own temporary configuration to approve one harmless `echo`. It never passes `--dangerously-skip-permissions` and never signs in or out.
 
-## Validation status of 0.1.0
+## Validation status
 
 | What | Where | Result |
 |---|---|---|
-| Offline suite, Python 3.11.18 and 3.14.4 | Linux (Ubuntu 26.04) | 235 tests each, 0 failures, 10 Windows-only skips |
-| Official MCP SDK 1.26.0 check, release check | Linux | Passed (13 of 13 SDK checks) |
+| Offline suite, Python 3.11.18 and 3.14.4, 0.1.0 | Linux (Ubuntu 26.04) | 235 tests each, 0 failures, 10 Windows-only skips |
+| Official MCP SDK 1.26.0 check, release check, 0.1.0 and 0.1.1 | Linux | Passed (13 of 13 SDK checks) |
 | Static check of the Windows and macOS code paths (`mypy --platform win32` / `darwin`, errors that appear only on those platforms) | Linux | None on macOS; two typing false positives on Windows |
-| Live checks with `agy` 1.5.13 (`scripts/live_smoke.py`) | Linux | 18 of 18 passed, 3.1 % of a free-tier weekly Gemini quota |
-| Offline suite on Windows and macOS | GitHub Actions | Runs on every push |
+| Live checks with `agy` 1.5.13 (`scripts/live_smoke.py`), 0.1.0 | Linux | 18 of 18 passed, 3.1 % of a free-tier weekly Gemini quota; 0.1.1: `status` and `start` passed |
+| Offline suite, SDK check and release check on macOS (Python 3.11, 3.14) | GitHub Actions, 0.1.0 | Passed (235 tests) |
+| Offline suite on Windows (Python 3.11, 3.14) | GitHub Actions, 0.1.0 | Failed: worktree permissions on Python 3.11 and three test fixtures; fixed in 0.1.1 |
+| Offline suite, Python 3.11.18 and 3.14.4, 0.1.1 | Linux | 239 tests each, 0 failures, 10 Windows-only skips |
+| Offline suite on Windows, 0.1.1 | GitHub Actions | Runs on every push |
 | Live use on Windows and macOS | — | Not yet verified |
 
 ## Release checklist

@@ -12,10 +12,22 @@ from antigravity_local_mcp.errors import BridgeError, native_error
 from antigravity_local_mcp.security import overlaps, read_project_file, redact, validate_windows_path
 from antigravity_local_mcp.store import Store
 from antigravity_local_mcp.tools import arguments, catalog
+from tests.fake_agy import Fake
 from tests.helpers import FAKE, Files, Harness
 
 
 class ContractTest(unittest.TestCase):
+    def test_fake_prompt_capabilities_use_a_portable_none_sentinel(self):
+        key = "FAKE_AGY_PROMPT_CAPS"
+        defaults = {"image", "embeddedContext"}
+        for env, expected in (({}, defaults), ({key: ""}, defaults), ({key: "none"}, set()), ({key: "image"}, {"image"})):
+            with self.subTest(env=env), patch.object(os, "environ", env):
+                server = Fake()
+                with patch.object(server, "reply") as reply:
+                    server.handle({"id": 1, "method": "initialize"})
+                caps = reply.call_args.args[1]["agentCapabilities"]["promptCapabilities"]
+                self.assertEqual({name for name, offered in caps.items() if offered}, expected)
+
     def test_catalog_all_names_versions_and_budget(self):
         names = "status projects models agents usage skills capabilities start send interrupt events get list requests respond review_request settings resume close sessions history diff worktrees"
         for version in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):

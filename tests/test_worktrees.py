@@ -4,10 +4,11 @@ import shutil
 import subprocess
 import sys
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from antigravity_local_mcp import worktrees as wt
+from antigravity_local_mcp import windows, worktrees as wt
 from antigravity_local_mcp.errors import BridgeError
 
 if __package__:
@@ -19,6 +20,9 @@ else:
 class GitTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(fake._tempdir())).resolve()
+        if sys.platform == "win32":
+            # The synthetic repo and its metadata must inherit a trusted ACL on 3.11 too.
+            windows.protect_directory(self.root, newly_created=True)
         self.env = fake._test_env(self.root)
         self.enterContext(patch.dict(os.environ, self.env, clear=True))
         self.state = self.root / "private"
@@ -426,19 +430,52 @@ class PlatformTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     os.fstat(fd)
 
-    def test_windows_private_scratch_uses_verified_inherited_acl(self):
-        with fake._tempdir() as tmp:
-            root = Path(tmp).resolve()
-            helper = wt.WorktreeHelper(private_dir=root)
-            access = Mock()
-            with patch.object(sys, "platform", "win32"), patch.object(wt, "_win_access", return_value=access), \
-                    patch.object(wt, "_path", side_effect=Path), patch.object(wt, "_Git"):
-                with helper._session():
-                    pass
-                with helper._session():
-                    pass
-            access.protect_new_directory.assert_called_once_with(root / "worktrees")
-            self.assertEqual(sum(c.kwargs.get("private", False) for c in access.verify.call_args_list), 2)
+    def test_windows_private_scratch_narrows_only_a_new_owned_directory(self):
+        for owner in ("fixture-user", "S-1-5-32-544", "foreign-owner"):
+            with self.subTest(owner=owner), fake._tempdir() as tmp:
+                root = Path(tmp).resolve()
+                helper = wt.WorktreeHelper(private_dir=root)
+                path = root / "worktrees"
+                grants = {"fixture-user", "untrusted-writer"}
+                api, access = Mock(), Mock()
+                api.sid_text.return_value = owner
+                api.advapi.GetSecurityInfo.return_value = 0
+                api.descriptor.return_value = nullcontext(Mock(lpSecurityDescriptor=1))
+
+                def protect(name, kind, flags, *rest):
+                    self.assertEqual((name, kind, flags), (str(path), 1, 0x80000004))
+                    self.assertEqual(api.advapi.GetSecurityInfo.call_args.args[:3], (42, 1, 1))
+                    api.check_access.assert_not_called()
+                    grants.remove("untrusted-writer")
+                    return 0
+
+                def verify(*args, **kwargs):
+                    if "untrusted-writer" in grants:
+                        raise PermissionError("inherited untrusted write ACE")
+
+                api.advapi.SetNamedSecurityInfoW.side_effect = protect
+                api.check_access.side_effect = access.verify.side_effect = verify
+                with patch.object(sys, "platform", "win32"), patch.object(wt, "_path", side_effect=Path), \
+                     patch.object(wt, "_win_access", return_value=access), patch.object(wt, "_Git") as git, \
+                     patch.object(windows, "api", return_value=api), patch.object(windows, "open_handle", return_value=42), \
+                     patch.object(windows, "current_sid", return_value="fixture-user"), \
+                     patch.object(windows, "_PROTECTED", {wt._key(path)}):
+                    if owner == "foreign-owner":
+                        with self.assertRaises(BridgeError) as caught:
+                            helper.git_version()
+                        self.assertEqual(caught.exception.code, "worktree_refused")
+                        api.advapi.SetNamedSecurityInfoW.assert_not_called()
+                        git.assert_not_called()
+                        continue
+                    helper.git_version()
+                    api.check_access.assert_called_once_with(42)
+                    access.verify.assert_any_call(path, private=True)
+                    grants.add("untrusted-writer")  # A pre-existing unsafe directory.
+                    with self.assertRaises(BridgeError) as caught:
+                        helper.git_version()
+                    self.assertEqual(caught.exception.code, "worktree_refused")
+                    api.advapi.SetNamedSecurityInfoW.assert_called_once()
+                    git.assert_called_once()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows Git for Windows installation")
     def test_native_git_in_directory_with_spaces(self):

@@ -1,5 +1,6 @@
 """Portability review regressions using harmless fixture paths and injected native APIs."""
 import json
+import ntpath
 import os
 import shlex
 import sys
@@ -7,7 +8,7 @@ import unittest
 import uuid
 import warnings
 from contextlib import contextmanager, nullcontext
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -126,6 +127,21 @@ class SpellingTests(unittest.TestCase):
             self.assertTrue(cmd.startswith(r"& 'C:\Python Here\python.exe' '-m' 'antigravity_local_mcp'"))
             self.assertIn(r"'--config' 'C:\User Info\o''brien & co.toml'", cmd)
             self.assertIn("PowerShell", review_step(conf, "one"))
+
+    def test_posix_spelling_on_a_windows_host(self):
+        # Win32 3.13+ treats a single leading slash as rooted, not absolute.
+        host = Mock(wraps=ntpath)
+        host.isabs.side_effect = lambda p: bool(ntpath.splitdrive(p)[0]) and ntpath.isabs(p)
+        host.abspath.return_value = r"D:\installed path\antigravity-local-mcp"
+        with patch.object(os, "path", host), patch.object(sys, "platform", "linux"), \
+             patch.object(os, "getcwd", return_value="/checkout"):
+            for exe, expected in (("/installed path/antigravity-local-mcp", "/installed path/antigravity-local-mcp"),
+                                  ("tools/antigravity-local-mcp", "/checkout/tools/antigravity-local-mcp")):
+                with patch.object(sys, "argv", [exe]):
+                    self.assertEqual(shlex.split(operator_command(None, "stop")), [expected, "stop"])
+            before = config.Config(None, PurePosixPath("/state"), agy_binary="/app/./agy")
+            after = config.Config(None, PurePosixPath("/state"), agy_binary="/app/agy")
+            self.assertEqual(before.fingerprint, after.fingerprint)
 
 
 class FilesystemTests(Files, unittest.TestCase):

@@ -272,7 +272,7 @@ class PhaseTwoTaskTests(Harness):
 
     async def test_optional_prompt_capability_refused_before_session_creation(self):
         (self.work/"note").write_text("hello", encoding="utf-8")
-        with patch.dict(os.environ, {"FAKE_AGY_PROMPT_CAPS": ""}), self.assert_code("optional_capability_unavailable"):
+        with patch.dict(os.environ, {"FAKE_AGY_PROMPT_CAPS": "none"}), self.assert_code("optional_capability_unavailable"):
             await self.start(context_files=["note"])
         self.assertEqual([m["method"] for m in self.native()], ["initialize"])
         self.assertFalse(list(self.history.iterdir()))

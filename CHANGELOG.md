@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 0.1.1 — Windows fixes
+
+### Fixed
+
+- **Worktrees on Windows with Python 3.11 and 3.12.** The worktree helper checked the permissions of its new private scratch folder before restricting them. Before Python 3.13, Windows ignores the folder mode, so the new folder inherits its parent's permissions, and every worktree action (`agy_worktrees`, the `worktree` argument of `agy_start`, `agy_diff` with Git) failed with "Windows could not verify object ownership or permissions". The helper now checks that the folder belongs to you, restricts it to your account and SYSTEM, and only then verifies it. Folders it did not create are still refused when their permissions are too broad.
+- **Path rules on POSIX systems no longer depend on how Python's `os.path` behaves on the machine.** Operator instructions (`server.py review …`), the `agy` lookup in `PATH` and the broker's settings fingerprint use POSIX rules explicitly. Behaviour on Linux and macOS is unchanged; this matters for the simulated-platform tests that CI runs on Windows.
+- **Test suite on Windows:** the simulated `agy`'s "no prompt capabilities" setting uses the value `none` (an empty environment value does not reach a child process on Windows), and the inherited-pipes test stops its helper process before its temporary folder is removed.
+- Regression tests reproduce each of these problems on Linux, with injected Windows path rules and a simulated Win32 permission layer.
+
+### Validation
+
+- The 0.1.0 CI run on GitHub: Ubuntu and **macOS** with Python 3.11 and 3.14 passed all 235 tests, the official MCP SDK check and the release check. This was the first native macOS run. Windows failed for the reasons above.
+- 0.1.1 on Linux (Ubuntu 26.04), Python 3.14.4 and 3.11.18: 239 tests each, 0 failures, 10 Windows-only tests skipped; official MCP SDK check 13 of 13; release check passed; the new regression tests fail on the 0.1.0 code and pass on 0.1.1. A short live check with Antigravity CLI 1.5.13 passed (`doctor`, start and result).
+- Windows: the six CI jobs after pushing 0.1.1 are the check.
+
 ## 0.1.0 — first release
 
 Antigravity MCP lets an MCP client such as Claude Code delegate coding work to Antigravity CLI (`agy`) agents on the same computer, through Google's documented Agent Client Protocol server (`agy acp`) and headless mode.

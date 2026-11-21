@@ -497,7 +497,7 @@ def process_creation_time(pid):
 _PROTECTED = set()
 
 
-def protect_directory(path):
+def protect_directory(path, *, newly_created=False):
     """Narrow a dedicated, current-user-owned application directory's DACL."""
     a = api()
     handle = open_handle(path, directory=True, share=3)
@@ -513,7 +513,7 @@ def protect_directory(path):
         finally:
             a.kernel.LocalFree(descriptor)
         key = path_key(path)
-        if key in _PROTECTED:
+        if not newly_created and key in _PROTECTED:
             # Already narrowed by this process. Re-verify on every call, but do
             # not rewrite the DACL: that propagates inherited entries through
             # the whole state tree on each broker request.

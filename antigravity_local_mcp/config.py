@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import posixpath
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
@@ -50,7 +51,7 @@ class Config:
             if data[field] is not None:
                 data[field] = path_key(data[field])
         for field in ("agy_binary", "git_binary"):
-            if sys.platform == "win32" or os.path.isabs(data[field]):
+            if sys.platform == "win32" or posixpath.isabs(data[field]):
                 data[field] = path_key(data[field])
         return hashlib.sha256(json.dumps(data, default=str, sort_keys=True).encode()).hexdigest()
 

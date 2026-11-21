@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from unittest.mock import patch
 
-from antigravity_local_mcp import lifecycle
+from antigravity_local_mcp import __version__, lifecycle
 from tests.helpers import Harness, key
 
 
@@ -331,7 +331,7 @@ class TaskTest(Harness):
         self.assertEqual(prompt[1]["resource"]["text"], "some context")
         self.assertEqual(prompt[2]["mimeType"], "image/png")
         init = self.native()[0]["params"]
-        self.assertEqual(init["clientInfo"], {"name": "antigravity-mcp", "version": "0.1.0"})
+        self.assertEqual(init["clientInfo"], {"name": "antigravity-mcp", "version": __version__})
         self.assertEqual(init["clientCapabilities"]["elicitation"], {"form": {}})
         for field, value in (("images", ["note"]), ("context_files", [".gemini/secret"]), ("context_files", ["../config.toml"])):
             with self.assert_code("invalid_arguments"):

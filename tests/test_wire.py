@@ -6,6 +6,7 @@ import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from antigravity_local_mcp import __version__
 from antigravity_local_mcp.broker import ensure_broker, stop_broker
 from antigravity_local_mcp.errors import BridgeError
 from antigravity_local_mcp.ipc import rpc
@@ -143,7 +144,7 @@ class WireTest(Files, unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.config.state_dir/"broker.json").exists())
 
     async def test_cli_status_doctor_review_and_graceful_stop(self):
-        self.assertEqual((await self.cli("--version"))[0].strip(), "0.1.0")
+        self.assertEqual((await self.cli("--version"))[0].strip(), __version__)
         report = json.loads((await self.cli("doctor", "--json"))[0])
         self.assertTrue(report["ok"])
         self.assertIsNone(report["broker"])

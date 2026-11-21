@@ -4,6 +4,7 @@ import copy
 import json
 import ntpath
 import os
+import posixpath
 import re
 import selectors
 import subprocess
@@ -66,7 +67,7 @@ def _find_binary(binary, env, *, windows, path, isfile, executable, resolve):
     candidates = [binary]
     if not explicit:
         paths = {k.upper(): v for k, v in env.items()} if windows else env
-        entries = paths.get("PATH", "").split(";" if windows else os.pathsep)
+        entries = paths.get("PATH", "").split(path.pathsep)
         suffixes = [""]
         if windows:
             entries = [p.strip().strip('"') for p in entries]
@@ -97,7 +98,8 @@ def resolve_agy(binary="agy") -> str:
         name = os.fspath(binary)
     except TypeError:
         raise BridgeError("invalid_arguments", "agy_binary must be a program name or absolute path.") from None
-    path = _find_binary(name, os.environ, windows=sys.platform == "win32", path=os.path,
+    flavour = ntpath if sys.platform == "win32" else posixpath
+    path = _find_binary(name, os.environ, windows=sys.platform == "win32", path=flavour,
                         isfile=os.path.isfile, executable=lambda p: os.access(p, os.X_OK),
                         resolve=os.path.realpath)
     if within(path, Path.home().resolve()/".gemini"):

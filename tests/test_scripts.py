@@ -17,21 +17,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from antigravity_local_mcp import __version__
 from scripts import live_smoke as live, release_check as release
 
 
 class ReleaseTests(unittest.TestCase):
-    version = "0.1.0"
-    init = b'__version__ = "0.1.0"\n'
-    metadata = b"Name: antigravity-local-mcp\nVersion: 0.1.0\n\n"
-    project = b'''[project]
+    version = __version__
+    init = f'__version__ = "{version}"\n'.encode()
+    metadata = f"Name: antigravity-local-mcp\nVersion: {version}\n\n".encode()
+    project = f'''[project]
 name = "antigravity-local-mcp"
-version = "0.1.0"
+version = "{version}"
 dependencies = []
 [project.scripts]
 antigravity-local-mcp = "antigravity_local_mcp.cli:main"
-'''
-    dist = "antigravity_local_mcp-0.1.0.dist-info/"
+'''.encode()
+    dist = f"antigravity_local_mcp-{version}.dist-info/"
     modules = {release.INIT, "antigravity_local_mcp/cli.py"}
 
     def wheel(self, *, extra=None, remove=None, link=None):
@@ -63,7 +64,7 @@ antigravity-local-mcp = "antigravity_local_mcp.cli:main"
         path = Path(temp) / "src.tar.gz"
         with tarfile.open(path, "w:gz") as archive:
             for name, content in files.items():
-                item = tarfile.TarInfo("antigravity_local_mcp-0.1.0/" + name)
+                item = tarfile.TarInfo(f"antigravity_local_mcp-{self.version}/{name}")
                 item.size = len(content)
                 if name == link:
                     item.type, item.linkname, item.size = tarfile.SYMTYPE, "../outside", 0
@@ -97,7 +98,7 @@ antigravity-local-mcp = "antigravity_local_mcp.cli:main"
             with self.subTest(name=name), self.assertRaises(ValueError):
                 release.inspect_wheel(self.wheel(extra={name: content}), self.version, self.modules)
         for name, content in ((release.INIT, b'__version__ = "9"'), ("PKG-INFO", b"Version: 9\n"),
-                              ("pyproject.toml", self.project.replace(b"0.1.0", b"9.0.0"))):
+                              ("pyproject.toml", self.project.replace(self.version.encode(), b"9.0.0"))):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 release.inspect_sdist(self.sdist(extra={name: content}), self.version, self.modules)
 

@@ -1,6 +1,7 @@
 import json
 import ntpath
 import os
+import posixpath
 import subprocess
 import sys
 import unittest
@@ -60,6 +61,13 @@ class ExecutableTests(unittest.TestCase):
         env["Pathext"] = ".CMD;.EXE;.PY"
         with self.assertRaisesRegex(BridgeError, r"\.exe"):
             lookup("agy")
+
+    def test_posix_lookup_keeps_its_path_separator_on_windows(self):
+        with patch.object(os, "pathsep", ";"):
+            path = cli._find_binary("agy", {"PATH": "/missing:/opt/agy"}, windows=False, path=posixpath,
+                                    isfile=lambda p: p == "/opt/agy/agy", executable=lambda p: True,
+                                    resolve=lambda p: p)
+        self.assertEqual(path, "/opt/agy/agy")
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows executable lookup")
     def test_windows_native_executable_and_python_launcher(self):

@@ -52,4 +52,4 @@ These features would require bypassing Antigravity's permission checks, Google's
 | No exactly-once execution across a lost reply | `agy` may have accepted a prompt just before the connection dropped | The task becomes `uncertain`; inspect it before sending more work |
 | Events that `agy` streamed while the broker was down are lost | ACP has no replay cursor for live updates | `agy_resume` with `replay_history: true` rebuilds the conversation from Antigravity's own history |
 | No remote access, no HTTP transport | Local-only by design | Run the server on the same machine as the MCP client |
-| MCP 2026-07-28 Tasks extension | Not implemented in 0.1.0 | Use the ordinary tools |
+| MCP 2026-07-28 Tasks extension | Not implemented yet | Use the ordinary tools |
