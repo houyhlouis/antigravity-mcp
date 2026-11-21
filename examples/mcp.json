@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "antigravity": {
+      "command": "python3",
+      "args": ["/absolute/path/to/antigravity-mcp/server.py", "serve"]
+    }
+  }
+}

@@ -1,0 +1,45 @@
+# Optional Antigravity MCP settings. Normal use needs no settings file.
+# Default location: ~/.config/antigravity-mcp/config.toml (macOS/Linux) or
+# %APPDATA%\AntigravityMCP\config.toml (Windows). Another file can be used with
+#   python3 server.py --config /absolute/path/config.toml serve
+# Keep this file private (chmod 600 on macOS/Linux) and outside every project
+# folder that you give to Antigravity. Unknown keys are errors. Paths may start
+# with ~; environment variables such as $HOME or %USERPROFILE% are not expanded.
+# After a change, run `python3 server.py stop` so the broker restarts with it.
+# See docs/configuration.md for details.
+
+# Antigravity CLI: a plain command name (searched only in the absolute folders of
+# PATH) or an absolute path. On Windows, the native agy.exe.
+agy_binary = "agy"
+
+# Private broker state (database, logs, socket). Defaults:
+#   macOS/Linux: ~/.local/state/antigravity-mcp   Windows: %LOCALAPPDATA%\AntigravityMCP
+# state_dir = "/absolute/private/state/antigravity-mcp"
+
+# agy processes that may run at the same time (1-16). Each uses about 230 MB
+# and your Antigravity quota.
+max_live_sessions = 4
+
+# true lets the main agent APPROVE Antigravity's permission prompts on your
+# behalf. Not needed for Antigravity's own Auto mode. Keep false unless you
+# fully trust the main agent.
+approval_relay = false
+
+# Close an idle agy process after this many minutes (0 = never). The next
+# agy_send reopens the conversation.
+idle_close_minutes = 30
+
+# Seconds without updates before the agent's own background work counts as settled.
+background_quiet_seconds = 15
+
+# Seconds a task with native subagents may stay silent before the server warns
+# that a subagent may be waiting for an approval Antigravity does not forward.
+subagent_stall_seconds = 300
+
+# Git worktrees for parallel tasks (needs Git 2.36 or newer).
+worktrees = true
+# worktree_root = "/home/me/worktrees"
+git_binary = "git"
+
+# true adds Antigravity's documented --disable-telemetry flag to `agy acp`.
+disable_telemetry = false

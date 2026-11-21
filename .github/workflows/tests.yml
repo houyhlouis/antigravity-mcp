@@ -1,0 +1,37 @@
+name: Tests
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11', '3.14']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile sources
+        run: python -m compileall -q antigravity_local_mcp tests scripts server.py
+      - name: Run offline tests
+        run: python scripts/run_tests.py
+      - name: Install the official MCP client
+        run: python -m pip install mcp==1.26.0
+      - name: Check SDK interoperability
+        run: python scripts/sdk_check.py
+      - name: Install the offline build backend
+        run: python -m pip install "setuptools>=77.0.3" wheel
+      - name: Install the build frontend
+        run: python -m pip install build
+      - name: Check release archives and installed command
+        run: python scripts/release_check.py --require-build --require-install

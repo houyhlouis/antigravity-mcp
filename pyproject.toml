@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antigravity-local-mcp"
+version = "0.1.0"
+description = "Local MCP server that lets another agent delegate work to Antigravity CLI agents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["mcp", "antigravity", "agy", "acp", "subagents", "local"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Repository = "https://github.com/houyhlouis/antigravity-mcp"
+Issues = "https://github.com/houyhlouis/antigravity-mcp/issues"
+
+[project.scripts]
+antigravity-local-mcp = "antigravity_local_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["antigravity_local_mcp*"]
