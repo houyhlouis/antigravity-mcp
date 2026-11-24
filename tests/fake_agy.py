@@ -139,8 +139,11 @@ class Fake:
                 ok = (answer.get("outcome") or {}).get("optionId") == "allow"
                 final = "Allowed" if ok else "Denied"
             else:
+                schema = FORM
+                if prompt.startswith("#fake:question-schema "):
+                    schema = json.loads(prompt.removeprefix("#fake:question-schema "))
                 answer = self.ask(turn, "elicitation/create", {"mode": "form", "toolCallId": call,
-                    "message": "The agent has a question.", "requestedSchema": FORM})
+                    "message": "The agent has a question.", "requestedSchema": schema})
                 final = json.dumps(answer.get("content", {}))
                 ok = answer.get("action") == "accept"
             if turn.cancel.is_set():

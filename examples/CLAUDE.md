@@ -6,7 +6,7 @@ Use the `antigravity` MCP server to delegate coding work to Antigravity CLI (`ag
 
 - Pick or create the project folder with `agy_projects`, then call `agy_start` with its `project_id` (or an absolute `workdir`). For parallel work on one repository, pass `worktree: {"repo": "/abs/repo", "name": "short-name"}` so the task gets its own Git worktree.
 - Give the Antigravity agent a concrete goal, the expected result, constraints and how to test it. Never include passwords, tokens or keys.
-- Use only models and thinking levels listed by `agy_models` or `agy_capabilities`. Leave `model`, `effort` and `mode` out to use the user's own Antigravity defaults.
+- Use only model IDs and thinking levels listed by `agy_models` or `agy_capabilities`; `mode` is one of `default`, `accept-edits`, `plan`, `auto` and `effort` one of `low`, `medium`, `high`, `xhigh`, `max` (a model may offer fewer). Leave `model`, `effort` and `mode` out to use the user's own Antigravity defaults.
 - Use a new, unique `request_id` for every call that changes something. Reuse one only to retry the identical call after a lost reply. In `agy_respond` and `agy_review_request`, `request_id` is the ID of the pending request instead.
 - Save the returned `task_id` and use it for follow-ups (`agy_send`). Slash commands such as `/compact` or `/plan ...` can be sent as prompts.
 - Check `agy_usage` before starting many tasks; Antigravity quota is limited and shared by all tasks.
@@ -27,12 +27,14 @@ Use the `antigravity` MCP server to delegate coding work to Antigravity CLI (`ag
 - Report the actual status, the changed files, the commands with their exit codes, test results, failures and remaining work. An `interrupted` or `failed` turn is not a success; neither is `turn_status: "truncated"`.
 - Base the report on `agy_get` with `"view": "result"`. It separates what the agent said (`final_message`) from what Antigravity reported doing (edits, commands, denied actions). If `evidence_complete` is false, say what may be missing.
 - For a worktree task, take the result with `agy_worktrees` `handoff` and show the patch to the user. Never remove a worktree the user has not reviewed.
+- Review handoff patches before applying them: they contain the exact bytes of untracked files not ignored by the repository's `.gitignore` or `.git/info/exclude` (personal `core.excludesFile` rules are not used).
 - Close tasks you no longer need with `agy_close`; this also stops their native subagents and background commands.
 
 ## Recovery
 
 - If a reply is lost, retry with the same `request_id` and arguments.
-- A failed call returns `ok: false` and an `error`. Act on `error.code`. If `error.uncertain` is true, the action may already have happened: inspect the task with `agy_get` before doing anything else. Repeat a call unchanged only if `error.retryable` is true.
+- A failed call returns `ok: false` and an `error`. Act on `error.code` and `error.next_steps`. If `error.uncertain` is true, the action may already have happened: inspect the task with `agy_get` before doing anything else. Repeat a call unchanged only if `error.retryable` is true.
 - `not_signed_in`: ask the user to run `agy` in a terminal on this computer and sign in. `quota_exhausted` or `rate_limited`: tell the user; do not retry in a loop.
-- If a task is `needs_resume` or `uncertain`, call `agy_resume`, read its `reconciliation` report (`unknown`, `next_steps`) and `agy_history`, and only then decide on new work.
+- When `agy_resume` or another control call returns `state_conflict` with the next step to use `agy_close`, inspect the task, close it with `agy_close`, and then call `agy_resume`. If a process from an earlier broker is still running, wait for it to exit first.
+- For a `needs_resume` or `uncertain` task, call `agy_resume` and read its `reconciliation` report (`unknown`, `next_steps`). After `replay_history: true` an unknown turn outcome stays `unknown`, so inspect `agy_get` and `agy_history` before new work.
 - Import an existing Antigravity conversation with `agy_sessions` only after the user confirms it is not open in another `agy` window.

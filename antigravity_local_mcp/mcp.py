@@ -10,12 +10,70 @@ from .contract import MCP_VERSIONS
 from .errors import BridgeError
 from .ipc import rpc
 from .platforms import stdio_lines
+from .schema import validate
 from .security import json_text, public_result, redact
-from .tools import BY_NAME, FRAME_LIMIT, arguments, catalog, failure, result, success
+from .tools import BY_NAME, FRAME_LIMIT, arguments, catalog, failure, obj, result, success
 
 
 def reject_constant(value):
     raise ValueError("Non-finite JSON number")
+
+
+def legacy_review_schema(schema):
+    """Adapt a redacted form to MCP 2025-06-18, or return None if it cannot be represented."""
+    text = {"type": "string"}
+    strings = {"type": "array", "items": text}
+    labels = {"title": text, "description": text}
+    integer = {"type": "integer"}
+    length = {**integer, "minimum": 0}
+    fields = {}
+    try:
+        validate(schema, obj({"type": {"const": "object"}, "properties": {"type": "object"},
+                              "required": strings, **labels}, ("type", "properties")))
+        if any(key not in schema["properties"] for key in schema.get("required", [])):
+            return None
+        for name, prop in schema["properties"].items():
+            if not isinstance(prop, dict):
+                return None
+            field = dict(prop)
+            kind = field.get("type")
+            if kind == "string" and "oneOf" in field:
+                if "enum" in field or "enumNames" in field:
+                    return None
+                options = field.pop("oneOf")
+                option = obj({"const": text, "title": text}, ("const", "title"))
+                validate(options, {"type": "array", "minItems": 1, "items": option})
+                values = [o["const"] for o in options]
+                if len(set(values)) != len(values):  # Repeated constants do not match exactly one branch.
+                    return None
+                field.update(enum=values, enumNames=[o["title"] for o in options])
+            if kind == "string" and "enum" in field:
+                keywords = {"enum": strings, "enumNames": strings}
+            elif kind == "string":
+                keywords = {"minLength": length, "maxLength": length,
+                            "format": {"enum": ["date", "date-time", "email", "uri"]}}
+            elif kind in ("number", "integer"):
+                keywords = {"minimum": integer, "maximum": integer}
+            elif kind == "boolean":
+                keywords = {"default": {"type": "boolean"}}
+            else:
+                return None
+            if kind != "boolean":
+                field.pop("default", None)
+            for bound in ("minLength", "maxLength", "minimum", "maximum"):
+                value = field.get(bound)
+                if isinstance(value, float) and value.is_integer():
+                    field[bound] = int(value)
+            validate(field, obj({"type": text, **labels, **keywords}, ("type",)))
+            if "enumNames" in field and len(field["enumNames"]) != len(field["enum"]):
+                return None
+            fields[name] = field
+    except BridgeError:
+        return None
+    adapted = {"type": "object", "properties": fields}
+    if "required" in schema:
+        adapted["required"] = schema["required"]
+    return adapted
 
 
 class MCP:
@@ -113,7 +171,11 @@ class MCP:
         self.capabilities = p["capabilities"]
         self.write(id=rid, result={"protocolVersion": self.version, "capabilities": {"tools": {"listChanged": False}},
                    "serverInfo": {"name": "antigravity-mcp", "version": __version__},
-                   "instructions": "Use agy_events to watch a task. Use agy_review_request for human approvals. Reuse operation keys only for identical calls."})
+                   "instructions": "Watch the task_id from agy_start with agy_events and use agy_review_request for human approvals. "
+                   "Choose a new request_id (alias operation_id) for each operation and reuse it only for an identical call. "
+                   "For agy_respond and agy_review_request, request_id (alias pending_request_id) comes from agy_events or agy_requests. "
+                   "Inspect uncertain results with agy_get before sending new work. "
+                   "Check the turn status and evidence for the coding outcome even when the read returns ok=true."})
 
     async def call(self, rid, p):
         name = p.get("name")
@@ -151,6 +213,10 @@ class MCP:
             raise authority.human_required(rid, config=self.config)
         form = authority.review_form(req)
         if self.version < "2025-11-25":
+            schema = legacy_review_schema(form["requestedSchema"])
+            if schema is None:
+                raise authority.human_required(rid, config=self.config)
+            form["requestedSchema"] = schema
             form.pop("mode")
         key = "review:" + str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
@@ -164,7 +230,6 @@ class MCP:
             value = reply.get("result") or {}
             if value.get("action") != "accept":
                 return {"request_id": rid, "answered": False}
-            from .schema import validate
             content = value.get("content")
             validate(content, {**form["requestedSchema"], "additionalProperties": False}, code="invalid_response")
             response = content if req["kind"] == "permission" else {"content": content}

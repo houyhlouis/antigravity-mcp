@@ -48,7 +48,7 @@ async def doctor(config, report=None):
         try:
             report = await workers.run(local_facts, config)
         finally:
-            workers.close()
+            await workers.close()
     try:
         report["broker"] = await rpc(config, "ping", timeout=2)
     except (FileNotFoundError, ConnectionRefusedError):

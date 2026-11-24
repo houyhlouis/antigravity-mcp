@@ -3,8 +3,10 @@
 # %APPDATA%\AntigravityMCP\config.toml (Windows). Another file can be used with
 #   python3 server.py --config /absolute/path/config.toml serve
 # Keep this file private (chmod 600 on macOS/Linux) and outside every project
-# folder that you give to Antigravity. Unknown keys are errors. Paths may start
-# with ~; environment variables such as $HOME or %USERPROFILE% are not expanded.
+# folder that you give to Antigravity. Unknown keys are errors. Paths in this
+# file must not start with ~ (use absolute paths, or a plain command name on PATH
+# for agy_binary and git_binary; --config and tool folder arguments do expand ~),
+# and environment variables such as $HOME or %USERPROFILE% are not expanded.
 # After a change, run `python3 server.py stop` so the broker restarts with it.
 # See docs/configuration.md for details.
 

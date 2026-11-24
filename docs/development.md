@@ -85,6 +85,11 @@ The script uses a temporary project and state folder, caps the run at 12 model t
 | Offline suite on Windows (Python 3.11, 3.14) | GitHub Actions, 0.1.0 | Failed: worktree permissions on Python 3.11 and three test fixtures; fixed in 0.1.1 |
 | Offline suite, Python 3.11.18 and 3.14.4, 0.1.1 | Linux | 239 tests each, 0 failures, 10 Windows-only skips |
 | Offline suite on Windows, 0.1.1 | GitHub Actions | Runs on every push |
+| Offline suite, Python 3.11.18 and 3.14.4, 0.1.2 | Linux (Ubuntu 26.04) | 263 tests each, 0 failures, 10 Windows-only skips |
+| Official MCP SDK 1.26.0 check, release check (`0.1.2`), `live_smoke.py --dry-run`, 0.1.2 | Linux (Ubuntu 26.04) | SDK check 13 of 13, wheel/sdist/installed command passed, dry run 18 of 18 |
+| Static check of the Windows and macOS code paths (`mypy --platform win32` / `darwin`), 0.1.2 | Linux (Ubuntu 26.04) | None on macOS; the same two typing false positives on Windows |
+| Live check with `agy` 1.5.16 (`scripts/live_smoke.py --only status usage start close-resume headless`, `gemini-3.8-flash`, `low`), 0.1.2 | Linux (Ubuntu 26.04) | 6 of 6 passed (`status`, `usage`, `start`, `close-resume`, `headless-schema`, `headless-denied`), about 0.04 % of the weekly Gemini quota |
+| Offline suite, SDK check and release check on Windows and macOS (Python 3.11, 3.14), 0.1.2 | GitHub Actions | Six CI jobs after the push |
 | Live use on Windows and macOS | — | Not yet verified |
 
 ## Release checklist

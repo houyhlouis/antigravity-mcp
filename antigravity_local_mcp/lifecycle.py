@@ -139,8 +139,9 @@ def lost(t, turn=None, uncertain=False):
 
 def restored(t, turn, replayed):
     if turn and turn["status"] == "unknown" and replayed:
-        turn.update(status="completed", final_message=replayed, evidence_complete=False)
-        t.update(turn_status="completed", summary=preview(replayed, 16384))
+        # Assistant history chunks carry text but no terminal stop reason.
+        turn["final_message"] = replayed
+        t["summary"] = preview(replayed, 16384)
     t.pop("before_loss", None)
     previous = t["background"]
     t["background"] = {**background(), "subagents_possibly_running": previous["subagents_possibly_running"],

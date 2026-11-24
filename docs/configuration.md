@@ -49,7 +49,7 @@ On Windows, use TOML single-quoted strings so that backslashes need no escaping:
 agy_binary = 'C:\Users\me\AppData\Local\Programs\agy\agy.exe'
 ```
 
-Paths may start with `~`. Environment variables such as `$HOME` or `%USERPROFILE%` are **not** expanded.
+Paths in the settings file must **not** start with `~`: `state_dir` and `worktree_root` must be absolute paths, and `agy_binary` and `git_binary` must be an absolute path or a plain command name looked up in `PATH` (values starting with `~`, such as `agy_binary = "~/.local/bin/agy"` or `state_dir = "~/state"`, are rejected at startup with `invalid_arguments`). The `--config` file path on the command line and folder arguments of the tools (for example `workdir`, `path` and `repo`, which must still be absolute after expansion and must not be your home folder itself) do expand a leading `~`. Environment variables such as `$HOME` or `%USERPROFILE%` are never expanded.
 
 ## After changing the file
 

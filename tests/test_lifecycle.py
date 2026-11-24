@@ -1,8 +1,11 @@
 import asyncio
 import os
+from dataclasses import replace
 from unittest.mock import patch
 
 from antigravity_local_mcp.acp import frames, write_stderr
+from antigravity_local_mcp.errors import BridgeError
+from antigravity_local_mcp.platforms import process_running
 from antigravity_local_mcp.service import Service
 from tests.helpers import Harness, key
 
@@ -49,28 +52,120 @@ class RecoveryTest(Harness):
         self.assertEqual(task["status"], "running")
         await self.wait_for(task["task_id"], "completed")
 
-    async def test_lost_ack_persists_uncertain_and_prevents_second_write(self):
-        t = await self.start("#fake:uncertain")
-        tid = t["task_id"]
-        await self.wait_for(tid, "completed")
+    async def lose_settings_ack(self, tid):
         op = key()
-        with patch("antigravity_local_mcp.acp.REQUEST_TIMEOUT", 0.12):
-            with self.assert_code("native_timeout"):
-                await self.control("settings", tid, request_id=op, mode="plan")
-        self.assertEqual(self.service.task(tid)["status"], "uncertain")
+        with patch("antigravity_local_mcp.acp.REQUEST_TIMEOUT", 0.12), self.assert_code("native_timeout"):
+            await self.control("settings", tid, request_id=op, mode="plan")
+        return op
+
+    async def test_lost_ack_persists_uncertain_and_prevents_second_write(self):
+        self.service.config = replace(self.config, max_live_sessions=2)
+        other = self.root/"other"
+        other.mkdir()
+        survivor = (await self.start(workdir=str(other)))["task_id"]
+        survivor_pid = (await self.wait_for(survivor, "completed"))["process"]["pid"]
+        t, req = await self.pending("#fake:uncertain #fake:permission")
+        tid = t["task_id"]
+        op = await self.lose_settings_ack(tid)
+        lost = await self.call("get", task_id=tid)
+        self.assertEqual(lost["status"], "uncertain")
+        self.assertTrue(process_running(lost["previous_pid"]))
         with self.assert_code("operation_uncertain"):
             await self.control("settings", tid, request_id=op, mode="plan")
-        self.assertEqual(sum(m.get("method") == "session/set_mode" for m in self.native()), 1)
         with self.assert_code("workspace_busy"):
             await self.start()
-        with self.assert_code("state_conflict"):
+        with self.assert_code("too_many_tasks"):
+            await self.start(workdir=str(other))
+        for name, args in (("send", {"prompt": "next"}), ("settings", {"mode": "plan"}),
+                           ("interrupt", {"expected_turn_id": t["turn_id"]})):
+            with self.assert_code("state_conflict"):
+                await self.control(name, tid, **args)
+        with self.assertRaises(BridgeError) as refused:
             await self.control("resume", tid)
-        # The original process exits after the lost acknowledgement.
-        s = self.service.sessions[tid]
-        await s.peer.close()
+        self.assertEqual(refused.exception.code, "state_conflict")
+
+        self.assertEqual((await self.control("close", tid))["status"], "closed")
+        self.assertIn("agy_close", " ".join(refused.exception.next_steps))
+        self.assertFalse(process_running(lost["previous_pid"]))
+        self.assertNotIn(tid, self.service.sessions)
+        closed = await self.call("get", task_id=tid)
+        self.assertFalse(closed["process"]["alive"])
+        self.assertEqual(closed["claims"], [])
+        self.assertEqual(closed["pending_requests"], [])
+        self.assertEqual((await self.call("requests"))["requests"], [])
+        saved = self.store.one("SELECT data FROM requests WHERE id=?", req["request_id"])
+        self.assertEqual(saved["status"], "cancelled")
+        self.assertIsNone(saved["decision"])
+
+        replacement = await self.start()
+        await self.control("close", replacement["task_id"])
+        await self.control("send", survivor, prompt="continue")
+        self.assertEqual((await self.wait_for(survivor, "completed", turn_id="turn-2"))["process"]["pid"], survivor_pid)
         r = await self.control("resume", tid)
         self.assertEqual(r["status"], "idle")
-        self.assertEqual(r["reconciliation"]["previous_process"]["alive"], False)
+        self.assertFalse(r["reconciliation"]["previous_process"]["alive"])
+        with self.assert_code("operation_uncertain"):
+            await self.control("settings", tid, request_id=op, mode="plan")
+        methods = [m.get("method") for m in self.native() if m.get("params", {}).get("sessionId") == t["session_id"]]
+        self.assertEqual(methods.count("session/set_mode"), 1)
+        self.assertEqual(methods.count("session/prompt"), 1)
+
+    async def test_close_actions_on_owned_lost_sessions(self):
+        for action, status in (("archive", "uncertain"), ("forget", "uncertain"), ("close", "needs_resume")):
+            with self.subTest(action=action, status=status):
+                tid = (await self.start("#fake:uncertain"))["task_id"]
+                finished = await self.wait_for(tid, "completed")
+                if status == "needs_resume":
+                    # Disconnect the ACP reader while the native child is still reading stdin.
+                    self.service.sessions[tid].peer.transport.get_pipe_transport(1).close()
+                else:
+                    await self.lose_settings_ack(tid)
+                lost = await self.wait_for(tid, status)
+                self.assertTrue(process_running(lost["previous_pid"]))
+                reply = await self.control("close", tid, action=action)
+                self.assertFalse(process_running(lost["previous_pid"]))
+                self.assertNotIn(tid, self.service.sessions)
+                if action == "forget":
+                    self.assertTrue(reply["forgotten"])
+                    with self.assert_code("not_found"):
+                        await self.call("get", task_id=tid)
+                elif action == "archive":
+                    self.assertEqual(reply["status"], "archived")
+                    await self.control("close", tid, action="unarchive")
+                    replay = await self.control("resume", tid, replay_history=True)
+                    self.assertEqual(replay["turn_status"], "completed")
+                    self.assertEqual(replay["stop_reason"], finished["stop_reason"])
+                    self.assertEqual(replay["reconciliation"]["unknown"], [])
+                else:
+                    self.assertEqual(reply["status"], "closed")
+
+    async def test_close_owned_uncertain_headless_run(self):
+        hold = self.root/"hold"
+        hold.touch()
+        with patch.dict(os.environ, {"FAKE_AGY_PIPE_HOLD": str(hold)}):
+            t = await self.start("#fake:inherited-pipes #fake:slow=30", engine="headless")
+        child_file = hold.with_suffix(".pid")
+        async with asyncio.timeout(5):
+            while not child_file.exists() or not child_file.stat().st_size:
+                await asyncio.sleep(.01)
+        child = int(child_file.read_text(encoding="ascii"))
+        self.assertTrue(process_running(child))
+        tid = t["task_id"]
+        run = self.service.sessions[tid].run
+        # Inject a lost control result while the real print-mode fixture is still running.
+        with patch.object(run, "interrupt", side_effect=BridgeError("transport_unavailable", "Lost control", uncertain=True)), \
+             self.assert_code("transport_unavailable"):
+            await self.control("interrupt", tid, expected_turn_id=t["turn_id"])
+        lost = await self.call("get", task_id=tid)
+        self.assertEqual(lost["status"], "uncertain")
+        self.assertTrue(process_running(lost["previous_pid"]))
+        self.assertEqual((await self.control("close", tid))["status"], "closed")
+        self.assertFalse(process_running(lost["previous_pid"]))
+        async with asyncio.timeout(5):
+            while process_running(child):
+                await asyncio.sleep(.01)
+        self.assertNotIn(tid, self.service.sessions)
+        self.assertEqual((await self.call("get", task_id=tid))["claims"], [])
 
     async def test_idle_process_exit_releases_workspace(self):
         t = await self.start()
@@ -107,8 +202,10 @@ class RecoveryTest(Harness):
             recovered.pending_request(req["request_id"])
         with self.assert_code("workspace_busy"):
             await recovered.call("agy_start", {"prompt": "p", "workdir": str(self.work), "request_id": key()})
-        with self.assert_code("state_conflict"):
-            await recovered.call("agy_resume", {"task_id": t["task_id"], "request_id": key()})
+        for name, args in (("resume", {}), ("close", {}), ("close", {"action": "archive"}), ("close", {"action": "forget"})):
+            with self.assert_code("state_conflict"):
+                await recovered.call("agy_"+name, {"task_id": t["task_id"], "request_id": key(), **args})
+        self.assertTrue(process_running(task["previous_pid"]))
 
     async def test_unadvertised_client_methods_and_foreign_session(self):
         t = await self.start("#fake:slow=1")

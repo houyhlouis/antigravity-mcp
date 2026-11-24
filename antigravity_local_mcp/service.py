@@ -22,6 +22,9 @@ from .security import overlaps, preview, private_file, project_path, public_resu
 from .tools import SETTINGS, arguments, result as mcp_result, success
 
 
+CLOSE_BEFORE_RESUME = "Use agy_close to stop the owned native session before calling agy_resume."
+
+
 def compact(t):
     return {k: t[k] for k in ("task_id", "project_id", "engine", "name", "session_id", "status", "turn_id", "turn_status",
                               "activity", "summary", "stop_reason", "session_open", "error", "revision", "redacted") if k in t}
@@ -39,6 +42,7 @@ class Service:
         self.reserved = {}
         self.stopping = False
         self.workers = Workers()
+        self.process_control = Workers(max_workers=2, thread_name_prefix="agy-local-control")
         self.native = NativeQueries(config)
         self.workspaces = Workspaces(self)
         self.adopting = set()
@@ -180,7 +184,7 @@ class Service:
         finally:
             self.monitor.cancel()
             await asyncio.gather(self.monitor, return_exceptions=True)
-            self.workers.close()
+            await asyncio.gather(self.process_control.close(), self.workers.close())
 
     async def call(self, name, values):
         a = arguments(name, values)
@@ -200,6 +204,8 @@ class Service:
                         session = self.sessions.get(a["task_id"])
                         if exc.uncertain and session and session.task["status"] not in life.LOST:
                             life.lost(session.task, session.journal.turn, uncertain=True)
+                            if session.owns_process(session.task["previous_pid"]):
+                                exc.next_steps.append(CLOSE_BEFORE_RESUME)
                             session.journal.emit("warning", {"code": "operation_uncertain", "operation_id": key}, "system")
                             session.journal.save()
                         raise
@@ -457,14 +463,22 @@ class Service:
             raise error
         return compact(t)
 
-    def check_previous(self, t):
+    def check_previous(self, t, *, closing=False):
         report = previous_process(t, process_running)
         if t["status"] in life.LOST and report["alive"]:
             pid = report["pid"]
             message = report.get("reason", "Its process creation identity matches.")
+            steps = ["Wait for the previous process to exit before resuming or releasing this folder."]
+            session = self.sessions.get(t["task_id"])
+            if session and session.owns_process(pid):
+                # Only explicit closure can use the retained child handle after contact was lost.
+                if closing:
+                    return report
+                message = "This broker still owns the native session."
+                steps = [CLOSE_BEFORE_RESUME]
             raise BridgeError("state_conflict", f"The previous Antigravity PID {pid} is live. {message}",
                               pid=pid, reconciliation={"before": life.snapshot(t), "previous_process": report},
-                              next_steps=["Wait for the previous process to exit before resuming or releasing this folder."])
+                              next_steps=steps)
         return report
 
     async def reopen(self, t, replay):
@@ -473,6 +487,7 @@ class Service:
         if not t["session_id"]:
             raise BridgeError("state_conflict", "This task has no native session ID to resume")
         before = dict(t.get("before_loss", life.snapshot(t)))
+        inspect = ["Inspect agy_get and agy_history before sending a follow-up."]
         if t["engine"] == "headless":
             project_path(self.config, t["workdir"])
             self.check_folders([t["workdir"], *t["add_dirs"]], t["task_id"])
@@ -494,7 +509,7 @@ class Service:
             self.store.save_task(t)
             unknown = ["Outcome of the previous print-mode run"] if t["turn_status"] == "unknown" else []
             return {"before": before, "previous_process": previous, "after": life.snapshot(t),
-                    "unknown": unknown, "next_steps": ["Send a follow-up to continue this conversation."]}
+                    "unknown": unknown, "next_steps": inspect if unknown else ["Send a follow-up to continue this conversation."]}
         old = deepcopy(t)
         requested = {k: t.get(k) for k in SETTINGS}
         project_path(self.config, t["workdir"])
@@ -523,7 +538,7 @@ class Service:
         if t["background"]["subagents_possibly_running"]:
             unknown.append("Whether native subagents are still running")
         return {"before": before, "previous_process": previous, "after": life.snapshot(t),
-                "unknown": unknown, "next_steps": ["Inspect agy_get and agy_history before sending a follow-up."] if unknown else []}
+                "unknown": unknown, "next_steps": inspect if unknown else []}
 
     async def control(self, name, a):
         tid = a["task_id"]
@@ -531,13 +546,13 @@ class Service:
         s = self.sessions.get(tid)
         if name == "close":
             action = a.get("action", "close")
-            self.check_previous(t)
+            self.check_previous(t, closing=action in ("close", "archive", "forget"))
             if action == "close" and t["status"] == "archived":
                 return compact(t)
             if action == "unarchive" and t["status"] != "archived":
                 raise BridgeError("state_conflict", "Unarchive requires an archived task")
             if s:
-                await s.close("closed")
+                await s.close("closed", force=t["status"] in life.LOST)
             if t["engine"] == "headless":
                 self.files.schema(t)
             if action == "forget":
@@ -559,6 +574,7 @@ class Service:
                 raise BridgeError("state_conflict", "The conversation must be closed or awaiting recovery")
             return {**{"task_id": tid}, "reconciliation": await self.reopen(t, a.get("replay_history", False)), **compact(t)}
         if t["status"] in life.LOST:
+            self.check_previous(t)
             raise BridgeError("state_conflict", "Use agy_resume to reconcile this task")
         if "expected_turn_id" in a and t["turn_id"] != a["expected_turn_id"]:
             raise BridgeError("stale_turn", "The expected turn is no longer current", ids={"turn_id": t["turn_id"]})

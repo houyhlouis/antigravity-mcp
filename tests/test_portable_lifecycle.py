@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -51,6 +52,82 @@ class ProcessIdentityTests(unittest.TestCase):
         first=process_identity.start_identity(os.getpid())
         self.assertIsNotNone(first)
         self.assertEqual(first, process_identity.start_identity(os.getpid()))
+
+
+class HeadlessControlTests(Harness):
+    @asynccontextmanager
+    async def expect_stop_with_busy_workers(self, task, method):
+        run = self.service.sessions[task["task_id"]].run
+        stop = getattr(run, method)
+        loop = asyncio.get_running_loop()
+        occupied = [asyncio.Event() for _ in range(4)]
+        release = threading.Event()
+
+        def hold_worker(started):
+            loop.call_soon_threadsafe(started.set)
+            return release.wait(10)
+
+        def observed_stop():
+            release.set()
+            stop()
+
+        jobs = [asyncio.create_task(self.service.workers.run(hold_worker, started)) for started in occupied]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(started.wait() for started in occupied)), 5)
+            with patch.object(run, method, side_effect=observed_stop) as dispatched:
+                yield dispatched
+                dispatched.assert_called_once_with()
+        finally:
+            release.set()
+            held_until_stop = await asyncio.gather(*jobs)
+        self.assertTrue(all(held_until_stop), f"An ordinary worker had to exit before run.{method}")
+
+    async def test_interrupt_reaches_run_with_all_query_workers_busy(self):
+        task = await self.start("#fake:slow=30", engine="headless")
+        async with self.expect_stop_with_busy_workers(task, "interrupt"):
+            await self.control("interrupt", task["task_id"], expected_turn_id=task["turn_id"])
+        await self.wait_for(task["task_id"], "interrupted")
+
+    async def test_close_reaches_terminate_with_all_query_workers_busy(self):
+        task = await self.start("#fake:slow=30", engine="headless")
+        session = self.service.sessions[task["task_id"]]
+        # Leave the fixture running through a simulated expiry of the interrupt grace period.
+        with patch.object(session.run, "interrupt") as interrupt, \
+             patch("antigravity_local_mcp.engine_headless.asyncio.wait", return_value=(set(), {session.consumer})) as grace:
+            async with self.expect_stop_with_busy_workers(task, "terminate"):
+                await self.control("close", task["task_id"])
+        interrupt.assert_called_once_with()
+        grace.assert_awaited_once_with((session.consumer,), timeout=15)
+        self.assertEqual(self.service.task(task["task_id"])["status"], "closed")
+
+    async def test_conflicting_init_uses_control_lane_after_journal_commit(self):
+        task = await self.start("#fake:slow=30", engine="headless")
+        tid = task["task_id"]
+        session = self.service.sessions[tid]
+        # A second connection sees the malformed-event warning only after commit.
+        reader = Store(self.config.state_dir)
+        self.addCleanup(reader.close)
+        cursor = reader.cursor()
+        warnings_at_dispatch = []
+        submit = self.service.process_control.run
+
+        async def observe_dispatch(stop):
+            events, _ = reader.events(cursor, [tid], 100, False)
+            warnings_at_dispatch.extend(e["data"]["message"] for e in events if e["kind"] == "warning")
+            await submit(stop)
+
+        async with self.expect_stop_with_busy_workers(task, "interrupt") as interrupt:
+            with patch.object(self.service.process_control, "run", side_effect=observe_dispatch) as dispatch:
+                await session.queue.put(("event", {"kind": "init", "conversation_id": "conflicting-id"}))
+                failed = await self.wait_for(tid, "failed")
+                dispatch.assert_awaited_once_with(interrupt)
+
+        self.assertIn("Dropped malformed headless event", warnings_at_dispatch)
+        self.assertEqual(failed["session_id"], task["session_id"])
+        self.assertEqual(failed["error"]["code"], "invalid_response")
+        self.assertIn("conflicting conversation ID", failed["error"]["message"])
+        self.assertFalse(failed["process"]["alive"])
+        self.assertTrue(reader.turn(tid, task["turn_id"])["evidence_lost"])
 
 
 class RecoveryIdentityTests(Harness):

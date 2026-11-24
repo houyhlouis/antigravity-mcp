@@ -27,6 +27,8 @@ Antigravity decides which actions need approval: its permission engine evaluates
 
 **Questions** from the Antigravity agent (its `ask_question` tool) are not permissions. The main agent may answer them, because it delegated the work. Answers are checked against the question's form before anything is sent, so a malformed answer is refused instead of silently becoming "skipped".
 
+Client forms from `agy_review_request` follow the MCP revision the client negotiated (`2025-11-25`, or converted `2025-06-18` forms), and your answer is checked against the form that was shown. When the client does not support forms or a question cannot be represented in `2025-06-18` without changing which answers are valid, `agy_review_request` falls back to `human_review_required` (`server.py review REQUEST_ID`) and leaves the request pending without answering or denying anything.
+
 ### A limit you should know
 
 The approval rules protect the MCP channel: nothing the main agent sends as a tool call can count as your approval. They do not protect against programs that run as your own OS account. Such a program can open the broker's private socket or named pipe (the operating system checks only the account, not the program), present itself as the terminal review, run `agy` itself, or fake an interactive terminal. If your main agent can run shell commands as you (Claude Code can, with your permission), keep your MCP client's own command approvals on, so that you see commands such as `server.py review` before they run.
@@ -73,6 +75,22 @@ The approval rules protect the MCP channel: nothing the main agent sends as a to
 ## The server's own Git
 
 Worktrees, handoffs and `agy_diff` run Git with your system and personal Git configuration ignored, hooks and the file-system monitor disabled, no external diff or credential helpers, and no network protocols. Repositories whose own configuration could make Git run programs or read data from elsewhere (filters including Git LFS, `include`/`includeIf`, aliases, command settings such as `core.sshCommand`, partial clones, alternates, sparse checkouts) are refused with a plain message. The server never merges, pushes, rebases or deletes unsaved work, and it runs Git in a folder only while no task reserves it, because an agent can change `.git/config`.
+
+By design, the server's Git never reads your personal or system Git configuration. This includes your personal `core.excludesFile` and `core.attributesFile`, and even a repository-local `core.excludesFile` or `core.attributesFile` setting is overridden; the server's Git honours only the repository's own `.gitignore` files and its shared exclude file `.git/info/exclude` for ignores. Git `agy_diff` output and worktree `handoff` patches preserve the exact bytes of untracked files that those repository rules do not ignore (without redaction, because patches are evidence and must apply cleanly; keeping handoffs tracked-only would silently drop newly created source files), and the server may hash or snapshot such files. Consequently, a local file hidden from ordinary `git status` only by your personal `core.excludesFile` (for example a local `.env` file) appears in full in `agy_diff` and `handoff`, and `cleanup` refuses (`worktree_refused`) while it exists without deleting it.
+
+Put patterns that every contributor shares in `.gitignore`, and put machine-local patterns in the repository's shared exclude file. In a linked worktree `.git` is a pointer file, so locate the shared exclude file with `git rev-parse --git-path info/exclude` (all worktrees of the repository share it).
+
+macOS / Linux:
+
+```bash
+echo "local-settings.env" >> "$(git rev-parse --git-path info/exclude)"
+```
+
+Windows (PowerShell):
+
+```powershell
+Add-Content -Path (git rev-parse --git-path info/exclude) -Value "local-settings.env"
+```
 
 ## Reporting a vulnerability
 

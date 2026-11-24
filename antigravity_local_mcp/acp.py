@@ -273,9 +273,12 @@ class Peer:
             if code is None:
                 self.on_exit(await self.process.wait())
 
-    async def close(self, timeout=15):
+    async def close(self, timeout=15, *, force=False):
         if not self.process:
             return
+        if force:
+            # Stop owned descendants even if the root would exit cleanly on stdin EOF.
+            await self._force_stop()
         self.process.stdin.close()
         deadline = asyncio.get_running_loop().time() + timeout
         self._close_deadline = min(deadline, self._close_deadline) if self._close_deadline is not None else deadline

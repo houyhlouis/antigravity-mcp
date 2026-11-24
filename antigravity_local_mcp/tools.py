@@ -1,5 +1,6 @@
 """MCP catalog, argument normalization and result envelopes."""
 from .errors import BridgeError
+from .prompts import ATTACHMENT_LIMIT, EFFORTS, MODES
 from .schema import validate
 from .security import json_text
 
@@ -12,10 +13,13 @@ OBJ = {"type": "object"}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 2**63-1}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 200}
 TASK = {"task_id": KEY}
-OP = {"request_id": KEY, "operation_id": KEY}
-PENDING = {"request_id": KEY, "pending_request_id": KEY}
-LOCATION = {"workdir": TEXT, "project_id": KEY}
-SETTINGS = {"mode": TEXT, "effort": TEXT, "model": TEXT}
+OP = {"request_id": {**KEY, "description": "Caller-chosen key."},
+      "operation_id": {**KEY, "description": "Same as request_id."}}
+PENDING = {"request_id": {**KEY, "description": "ID from agy_requests or agy_events."},
+           "pending_request_id": {**KEY, "description": "Same as request_id."}}
+LOCATION = {"workdir": {**TEXT, "description": "Absolute folder instead of project_id."},
+            "project_id": {**KEY, "description": "Registered project ID."}}
+SETTINGS = {"mode": TEXT, "effort": TEXT, "model": {**TEXT, "description": "ID from agy_models or agy_capabilities."}}
 PAGE = {"offset": OFFSET, "limit": LIMIT}
 ERROR_SCHEMA = {"type": "object", "required": ["code", "message", "retryable", "uncertain", "next_steps", "ids"],
                 "properties": {"code": TEXT, "message": {"type": "string"}, "retryable": BOOL, "uncertain": BOOL,
@@ -34,11 +38,34 @@ def obj(props, required=()):
     return {"type": "object", "properties": props, "required": list(required), "additionalProperties": False}
 
 
-def tool(name, description, props, required=(), *, read=False, destructive=False, keyed=False, pending=False):
-    schema = obj(props, required)
+def required_alternatives(*fields):
+    return [{"required": [field]} for field in fields]
+
+
+_ARGUMENT_SHAPES = {}
+
+
+def tool(name, description, props, required=(), *, read=False, destructive=False, keyed=False, pending=False,
+         locations=(), conditions=()):
+    shape = obj(props, required)
     if keyed or pending:
-        alias = "pending_request_id" if pending else "operation_id"
-        schema["anyOf"] = [{"required": ["request_id"]}, {"required": [alias]}]
+        shape["anyOf"] = required_alternatives(*(PENDING if pending else OP))
+    scope = {"oneOf": required_alternatives(*locations)} if locations else {}
+    if name == "start":
+        shape.update(scope)
+    # Keep the existing pre-normalization checks and their error precedence.
+    # arguments() diagnoses relationships. prompts.settings() rejects unknown settings
+    # after the broker records the operation key, preserving its refusal on retry.
+    _ARGUMENT_SHAPES["agy_" + name] = shape
+    schema = {**shape, **scope}
+    if locations and keyed:
+        conditions = ({"anyOf": schema.pop("anyOf")}, *conditions)
+    if conditions:
+        # Clients that flatten alternatives display only the single, required-only
+        # top-level choice. Nested conditions must also be readable in the catalog text.
+        schema["allOf"] = list(conditions)
+    if "mode" in props:
+        schema["properties"] = {**props, "mode": enum(*MODES), "effort": enum(*EFFORTS)}
     return {"name": "agy_" + name, "description": description, "inputSchema": schema,
             "annotations": {"readOnlyHint": read, "destructiveHint": destructive,
                             "idempotentHint": read or keyed or name == "projects",
@@ -50,46 +77,106 @@ def tool(name, description, props, required=(), *, read=False, destructive=False
 
 
 WORKTREE = obj({"repo": TEXT, "project_id": KEY, "name": TEXT, "base": TEXT}, ("name",))
-INPUT = {"prompt": {**TEXT, "maxLength": 262144}, "context_files": array(TEXT, 20),
-         "images": {**array(TEXT, 10), "description": "At most 10 images. The whole encoded ACP prompt must fit in 8 MiB (about 6 MiB of raw images in total)."},
-         "output_schema": {"type": "object", "required": ["type"], "properties": {"type": {"const": "object"}}}}
+WORKTREE.update(oneOf=required_alternatives("project_id", "repo"), description="Create a branch and checkout before starting.")
+INPUT = {"prompt": {**TEXT, "maxLength": 262144},
+         "context_files": {**array(TEXT, 20), "description": "UTF-8 files inside the project."},
+         "images": {**array(TEXT, 10), "description": "Project image paths (ACP only). Encoded prompt limit 8 MiB (about 6 MiB raw images)."},
+         "output_schema": {"type": "object", "required": ["type"], "properties": {"type": {"const": "object"}},
+                           "description": "Headless structured output only."}}
+CURRENT_TURN = {**KEY, "description": "Current turn_id from agy_get or agy_events."}
+PATCH_FILES = ("Git patches preserve exact bytes and include untracked files except those ignored by repository .gitignore files or info/exclude. "
+               "Git bypasses personal and system config and any core.excludesFile setting.")
+HEADLESS_OPTIONS = {"anyOf": [
+    {"properties": {"engine": {"const": "headless"}}, "required": ["engine"]},
+    {"properties": {"output_schema": False, "timeout_seconds": False}},
+]}
+STEERING = {"anyOf": [{"properties": {"steer": {"const": False}}}, {"required": ["expected_turn_id"]}]}
+SESSION_ACTIONS = {"oneOf": [
+    {"properties": {"action": {"const": "list"}, "session_id": False, "confirm_not_open": False,
+                    "request_id": False, "operation_id": False}},
+    {"properties": {"action": {"const": "import"}, "confirm_not_open": {"const": True}},
+     "required": ["session_id", "confirm_not_open"], "anyOf": required_alternatives(*OP)},
+]}
 CATALOG = [
     tool("status", "Installation, broker, live sessions and pending requests.", {"requests_cursor": OFFSET, "requests_limit": LIMIT}, read=True),
-    tool("projects", "List registered projects or select/create an absolute directory.", {"action": enum("list", "select", "create"), "path": TEXT, **PAGE}),
+    tool("projects", "List (default) takes offset/limit. Select registers an existing folder. Create makes it if needed "
+         "without initializing Git. Both return project_id.",
+         {"action": enum("list", "select", "create"), "path": {**TEXT, "description": "Absolute folder. Required for select/create only."}, **PAGE}),
     tool("models", "List model IDs and defaults. Availability can vary by account and client.", {"refresh": BOOL}, read=True),
-    tool("agents", "List agents available in a workspace.", LOCATION, read=True),
+    tool("agents", "List agents for agy_start, optionally by workdir or project_id.", LOCATION, read=True),
     tool("usage", "Read account quota and available credits.", {"refresh": BOOL}, read=True),
-    tool("skills", "List skills in a workspace.", LOCATION, read=True),
+    tool("skills", "List skills for exactly one workdir or project_id.", LOCATION, read=True, locations=LOCATION),
     tool("capabilities", "Inspect the session's modes, models, commands and capabilities.", TASK, ("task_id",), read=True),
-    tool("start", "Start a coding task in one selected folder or managed worktree.", {
-        **OP, **INPUT, **LOCATION, **SETTINGS, "worktree": WORKTREE, "name": TEXT, "engine": enum("acp", "headless"),
-        "add_dirs": array(TEXT, 8), "agent": TEXT, "sandbox": BOOL, "timeout_seconds": {"type": "integer", "minimum": 1}},
-        ("prompt",), keyed=True),
-    tool("send", "Send a follow-up or steer the expected running turn.", {**TASK, **OP, **INPUT, **SETTINGS,
-        "steer": BOOL, "expected_turn_id": KEY}, ("task_id", "prompt"), keyed=True),
-    tool("interrupt", "Cancel the expected turn and its open requests.", {**TASK, **OP, "expected_turn_id": KEY},
+    tool("start", "Start requires an operation key. The coding agent may edit or delete files and run commands. "
+         "Omitted mode, model and effort use Antigravity defaults.", {
+        **OP, **INPUT, **LOCATION, **SETTINGS, "worktree": WORKTREE, "name": TEXT,
+        "engine": {**enum("acp", "headless"), "default": "acp",
+                   "description": "ACP supports questions, approvals and steering. Headless runs once per turn and denies actions needing approval."},
+        "add_dirs": array(TEXT, 8), "agent": TEXT, "sandbox": {**BOOL, "description": "Opt in to the native sandbox."},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Run timeout (headless only)."}},
+        ("prompt",), keyed=True, destructive=True, locations=(*LOCATION, "worktree"), conditions=(HEADLESS_OPTIONS,)),
+    tool("send", "Follow up after a turn finishes, or steer a running ACP turn. Either may edit or delete files and run commands. "
+         "Follow-ups inherit task settings and reopen closed tasks. Use agy_resume for lost tasks first.",
+         {**TASK, **OP, **INPUT, **SETTINGS, "steer": {**BOOL, "description": "When true, requires expected_turn_id."},
+          "expected_turn_id": CURRENT_TURN}, ("task_id", "prompt"), keyed=True, destructive=True, conditions=(STEERING,)),
+    tool("interrupt", "Start cancellation and cancel pending requests. Edits and completed commands remain. "
+         "Status may be interrupting. Watch agy_events for a terminal state. Use agy_close to stop background work and subagents.",
+         {**TASK, **OP, "expected_turn_id": CURRENT_TURN},
         ("task_id", "expected_turn_id"), keyed=True),
-    tool("events", "Replay the journal or wait for updates from selected tasks.", {**TASK, "task_ids": array(KEY, 50),
-        "after": OFFSET, "cursor": OFFSET, "limit": LIMIT, "wait_seconds": {"type": "number", "minimum": 0, "maximum": 25},
-        "view": enum("default", "compact", "outcome"), "include_thoughts": BOOL}, read=True),
-    tool("get", "Read task state, turn evidence, or exact artifact text. Concatenate pages before decoding base64.", {**TASK, "view": enum("default", "compact", "result", "artifact"),
-        "turn_id": KEY, "artifact_id": KEY, "offset": OFFSET, "limit": {"type": "integer", "minimum": 1, "maximum": 1048576}},
+    tool("events", "Read the journal for task_id or task_ids (default all tasks). Reuse the returned cursor with the same selection and filters.", {**TASK,
+        "task_ids": {**array(KEY, 50), "description": "Nonempty alternative to task_id."},
+        "after": {**OFFSET, "description": "Exclusive journal position (default 0)."},
+        "cursor": {**OFFSET, "description": "Alias for after. Both must match if supplied."}, "limit": LIMIT,
+        "wait_seconds": {"type": "number", "minimum": 0, "maximum": 25, "default": 0},
+        "view": {**enum("default", "compact", "outcome"), "description": "Compact shortens large event data. Outcome returns task states without event bodies."},
+        "include_thoughts": {**BOOL, "default": False}}, read=True),
+    tool("get", "Default and compact return task snapshots. Result returns turn evidence. Only artifact takes artifact_id (required) and offset/limit. "
+         "Check encoding (utf-8 or base64) first. Join pages before decoding base64. ok reports read success. Check turn status for the outcome.",
+         {**TASK, "view": enum("default", "compact", "result", "artifact"),
+        "turn_id": {**KEY, "description": "Result view only. Defaults to the latest turn."},
+        "artifact_id": {**KEY, "description": "Artifact view only."},
+        "offset": {**OFFSET, "description": "Characters of the returned encoding. Continue with next_offset."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 1048576, "description": "Artifact characters per page."}},
         ("task_id",), read=True),
     tool("list", "List local tasks, newest first.", {**PAGE, "include_archived": BOOL}, read=True),
     tool("requests", "Page pending questions and permissions.", {**TASK, "cursor": OFFSET, "limit": LIMIT}, read=True),
-    tool("respond", "Answer a question, deny a permission, or relay an allowed decision.", {**PENDING, "response": OBJ},
-         ("response",), pending=True),
-    tool("review_request", "Ask the human to review a pending permission or question.", PENDING, pending=True),
-    tool("settings", "Change mode, model or effort for this session.", {**TASK, **OP, **SETTINGS}, ("task_id",), keyed=True),
-    tool("resume", "Reopen a conversation and reconcile its previous state.", {**TASK, **OP, "replay_history": BOOL}, ("task_id",), keyed=True),
-    tool("close", "Close, archive, unarchive or forget a local task.", {**TASK, **OP, "action": enum("close", "archive", "unarchive", "forget")}, ("task_id",), destructive=True, keyed=True),
-    tool("sessions", "List native conversations or import a confirmed closed conversation.", {**LOCATION, **OP,
-        "action": enum("list", "import"), "session_id": KEY, "confirm_not_open": BOOL}, ("action",)),
+    tool("respond", "Answer a question or permission. Agent grants require operator-enabled approval_relay and must be one-time. "
+         "Use agy_review_request for human approval.", {**PENDING, "response": {**OBJ,
+         "description": "Permission takes decision (allow/deny) or an offered option_id. "
+                        "Questions take answers or content with the requested fields, or action (decline/cancel)."}},
+         ("response",), pending=True, destructive=True),
+    tool("review_request", "Apply a human's answer to a permission or question (wait up to 300 seconds). Dismissal, decline or timeout returns "
+         "answered=false without denying the request. Recheck agy_requests. If the client cannot show the form, "
+         "the request stays pending and human_review_required gives the terminal command.",
+         PENDING, pending=True, destructive=True),
+    tool("settings", "Replace at least one stored setting (mode, model or effort). Changes apply now in live ACP sessions "
+         "or on the next run for closed/headless tasks.", {**TASK, **OP, **SETTINGS}, ("task_id",),
+         keyed=True, conditions=({"anyOf": required_alternatives(*SETTINGS)},)),
+    tool("resume", "Reconcile and reopen a closed, interrupted, needs_resume or uncertain task without resending a prompt. "
+         "Use agy_close first for an owned uncertain session.", {**TASK, **OP, "replay_history": {**BOOL,
+         "description": "Restore native history text to the journal and turn evidence. An unknown outcome stays unknown."}}, ("task_id",), keyed=True),
+    tool("close", "Close (default) stops the owned process tree, cancels pending requests and releases the folder. Archive also hides "
+         "the task. Unarchive restores it to closed. Forget deletes the local task, evidence and logs. The native conversation survives. "
+         "Git merging and worktree cleanup are separate.", {**TASK, **OP,
+         "action": enum("close", "archive", "unarchive", "forget")}, ("task_id",), destructive=True, keyed=True),
+    tool("sessions", "List native conversations using only a workspace selector. Import adopts a conversation and its history as "
+         "a local task. It needs session_id, an operation key and confirm_not_open=true.", {**LOCATION, **OP,
+        "action": enum("list", "import"), "session_id": {**KEY, "description": "Native ID from list. Import only."},
+        "confirm_not_open": {**BOOL, "description": "Confirm it is closed elsewhere before import."}}, ("action",),
+        locations=LOCATION, conditions=(SESSION_ACTIONS,)),
     tool("history", "Page turn summaries, newest first.", {**TASK, **PAGE}, ("task_id",), read=True),
-    tool("diff", "Inspect changes in the task's folder.", {**TASK, **PAGE, "turn_id": KEY, "format": enum("patch", "stat")}, ("task_id",), read=True),
-    tool("worktrees", "Plan, create, inspect, hand off or clean up a managed worktree.", {**OP, **TASK,
+    tool("diff", "Page patch or stat by character. Refused during a turn or workspace reservation. "
+         "Git compares the whole workspace to HEAD or the worktree base. Without Git, read observed edits. " + PATCH_FILES, {**TASK, **PAGE,
+         "turn_id": {**KEY, "description": "Git only checks this turn exists. Without Git, selects this turn's observed edits."},
+         "format": enum("patch", "stat")}, ("task_id",), read=True),
+    tool("worktrees", "Plan(name, repo or project_id, optional base) returns plan_id. Create(plan_id, operation key) returns project_id. "
+         "Inspect(project_id or path) shows state. Handoff(task_id or project_id) returns a patch artifact against the base for agy_get. "
+         "Cleanup(project_id, operation key, optional keep_branch) removes the checkout and normally its branch. "
+         "It refuses reserved, locked or dirty checkouts, including ignored files. No action merges or pushes. " + PATCH_FILES, {**OP, **TASK,
         "action": enum("plan", "create", "inspect", "handoff", "cleanup"), "repo": TEXT, "project_id": KEY,
-        "name": TEXT, "base": TEXT, "plan_id": KEY, "path": TEXT, "keep_branch": BOOL}, ("action",), destructive=True),
+        "name": TEXT, "base": TEXT, "plan_id": KEY, "path": {**TEXT, "description": "Inspect by path instead of project_id."},
+        "keep_branch": {**BOOL, "description": "Keep the branch. Cleanup refuses commits ahead of base unless true."}},
+        ("action",), destructive=True),
 ]
 BY_NAME = {t["name"]: t for t in CATALOG}
 
@@ -116,8 +203,6 @@ for descriptor in CATALOG:
     output["properties"].update({field: {"type": kind} for field, kind in fields.items()})
     output["oneOf"] = [{"properties": {"ok": {"const": True}}},
                        {"properties": {"ok": {"const": False}, "error": ERROR_SCHEMA}, "required": ["error"]}]
-BY_NAME["agy_start"]["inputSchema"]["oneOf"] = [{"required": [f]} for f in (*LOCATION, "worktree")]
-WORKTREE["oneOf"] = [{"required": ["project_id"]}, {"required": ["repo"]}]
 BY_NAME["agy_status"]["outputSchema"]["properties"]["version"] = {"type": ["string", "null"]}
 BY_NAME["agy_status"]["outputSchema"]["properties"]["signed_in"] = {"type": ["boolean", "null"]}
 BY_NAME["agy_models"]["outputSchema"]["properties"]["defaults"] = OBJ
@@ -144,9 +229,8 @@ def exactly_one(args, fields):
 def arguments(name, values):
     require(isinstance(name, str) and name in BY_NAME, "Unknown tool")
     if isinstance(values, dict) and isinstance(values.get("images"), list) and len(values["images"]) > 10:
-        from .prompts import ATTACHMENT_LIMIT
         require(False, ATTACHMENT_LIMIT)
-    validate(values, BY_NAME[name]["inputSchema"])
+    validate(values, _ARGUMENT_SHAPES[name])
     args = dict(values)
     for alias, preferred in (("operation_id", "request_id"), ("pending_request_id", "request_id"), ("cursor", "after")):
         if alias in args and (alias != "cursor" or name == "agy_events"):

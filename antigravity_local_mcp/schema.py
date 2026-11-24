@@ -3,6 +3,13 @@ import math
 from .errors import BridgeError
 
 
+SUPPORTED_KEYWORDS = frozenset({
+    "type", "properties", "required", "additionalProperties", "items", "enum", "enumNames",
+    "default", "description", "title", "minimum", "maximum", "minLength", "maxLength",
+    "minItems", "maxItems", "$schema", "format", "anyOf", "oneOf", "allOf", "const",
+})
+
+
 def validate(value, schema, path="arguments", *, code="invalid_arguments"):
     """Validate the JSON Schema subset used here and by primitive MCP forms.
 
@@ -13,11 +20,11 @@ def validate(value, schema, path="arguments", *, code="invalid_arguments"):
         return
     if schema is False or not isinstance(schema, dict):
         raise BridgeError(code, f"{path}: unsupported schema")
-    supported = {"type", "properties", "required", "additionalProperties", "items", "enum",
-                 "default", "description", "title", "minimum", "maximum", "minLength",
-                 "maxLength", "minItems", "maxItems", "$schema", "format", "anyOf", "oneOf", "const"}
-    if set(schema) - supported:
+    # allOf describes tool inputs. Keep the existing primitive native form dialect.
+    if set(schema) - SUPPORTED_KEYWORDS or (code == "invalid_response" and "allOf" in schema):
         raise BridgeError(code, f"{path}: unsupported form schema; use Antigravity directly for this request")
+    for candidate in schema.get("allOf", ()):
+        validate(value, candidate, path, code=code)
     for keyword in ("anyOf", "oneOf"):
         if keyword in schema:
             matches = 0

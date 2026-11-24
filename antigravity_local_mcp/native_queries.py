@@ -11,12 +11,15 @@ from .security import private_dir
 
 
 class Workers:
-    """Keep blocking CLI and Git work off the broker loop, including under cancellation."""
-    def __init__(self):
-        self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agy-local-query")
+    """Run bounded blocking work off the broker loop, including under cancellation."""
+    def __init__(self, *, max_workers=4, thread_name_prefix="agy-local-query"):
+        self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+        self.pending = set()
 
     async def run(self, function, *args, **kwargs):
         future = asyncio.get_running_loop().run_in_executor(self.pool, partial(function, *args, **kwargs))
+        self.pending.add(future)
+        future.add_done_callback(self.pending.discard)
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
@@ -24,7 +27,11 @@ class Workers:
             await asyncio.shield(future)
             raise
 
-    def close(self):
+    async def close(self):
+        # Refuse new work and keep the loop available until all submitted calls finish.
+        self.pool.shutdown(wait=False)
+        if self.pending:
+            await asyncio.wait(self.pending)
         self.pool.shutdown(wait=True)
 
 

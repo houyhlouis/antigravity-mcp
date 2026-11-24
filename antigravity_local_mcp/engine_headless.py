@@ -26,6 +26,9 @@ class PrintSession:
         self.queue = asyncio.Queue(maxsize=16)
         self.ready = asyncio.Event()
 
+    def owns_process(self, pid):
+        return self.run is not None and self.run.owns_process(pid)
+
     def enqueue(self, kind, data):
         # stdout is drained on a native thread. Bound its backlog even if a task
         # produces thousands of steps before SQLite can journal them.
@@ -119,11 +122,17 @@ class PrintSession:
                 return
             with self.store.atomic():
                 try:
-                    self.event(data)
+                    stop = self.event(data)
                 except (ValueError, KeyError, TypeError, AttributeError):
-                    self.journal.turn["evidence_lost"] = True
-                    self.journal.emit("warning", {"message": "Dropped malformed headless event"})
-                    self.journal.save()
+                    self.malformed_event()
+                    continue
+            if stop is not None:
+                await self.service.process_control.run(stop)
+
+    def malformed_event(self):
+        self.journal.turn["evidence_lost"] = True
+        self.journal.emit("warning", {"message": "Dropped malformed headless event"})
+        self.journal.save()
 
     def bind_conversation(self, cid):
         t = self.task
@@ -135,6 +144,7 @@ class PrintSession:
         return True
 
     def event(self, event):
+        """Journal the event and return any stop call to run after the transaction."""
         t, j, kind = self.task, self.journal, event["kind"]
         j.touch()
         if kind == "message_delta":
@@ -144,8 +154,8 @@ class PrintSession:
         if kind == "init":
             cid = event.get("conversation_id")
             if not self.bind_conversation(cid):
-                self.run.interrupt()
-                raise ValueError("Invalid native conversation identity")
+                self.malformed_event()
+                return self.run.interrupt
             t["session_open"] = True
             # Only explicit settings become overrides on subsequent runs.
             t["model"] = event.get("model") or t["model"]
@@ -257,7 +267,7 @@ class PrintSession:
     async def interrupt(self):
         life.interrupt(self.task)
         self.journal.save()
-        await self.service.workers.run(self.run.interrupt)
+        await self.service.process_control.run(self.run.interrupt)
 
     async def close(self, reason, *, force=False):
         self.closing = True
@@ -266,9 +276,10 @@ class PrintSession:
             return
         if not self.consumer.done():
             self.reason = reason
-            await self.service.workers.run(self.run.interrupt)
+            stop = self.run.terminate if force and self.task["status"] in life.LOST else self.run.interrupt
+            await self.service.process_control.run(stop)
             _, pending = await asyncio.wait((self.consumer,), timeout=15)
             if pending:
-                await self.service.workers.run(self.run.terminate)
+                await self.service.process_control.run(self.run.terminate)
         # Only consume() releases a started session, after its terminal commit.
         await asyncio.wait_for(asyncio.shield(self.consumer), 5)

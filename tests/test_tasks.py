@@ -246,15 +246,35 @@ class TaskTest(Harness):
         self.assertEqual(sum(m.get("method") == "session/prompt" for m in self.native()), 1)
 
     async def test_replay_rebuilds_lost_evidence(self):
-        t = await self.start("#fake:crash")
-        await self.wait_for(t["task_id"], "needs_resume")
-        with (self.history/t["session_id"]).open("a") as f:
-            f.write(json.dumps(["agent_message_chunk", "Recovered final message."])+"\n")
-        res = await self.control("resume", t["task_id"], replay_history=True)
-        self.assertEqual(res["turn_status"], "completed")
-        self.assertEqual(res["summary"], "Recovered final message.")
-        events = (await self.call("events", task_id=t["task_id"]))["events"]
-        self.assertTrue(any(e["kind"] == e["origin"] == "history" for e in events))
+        for engine in ("acp", "headless"):
+            for text in ("I will inspect the code.", "The failing test is in te", "All fixes are complete."):
+                with self.subTest(engine=engine, text=text):
+                    t = await self.start("#fake:crash", engine=engine)
+                    tid = t["task_id"]
+                    await self.wait_for(tid, "needs_resume")
+                    with (self.history/t["session_id"]).open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(["agent_message_chunk", text])+"\n")
+                    sent = len(self.native())
+                    res = await self.control("resume", tid, replay_history=True)
+                    self.assertEqual(res["status"], "idle")
+                    self.assertEqual(res["turn_status"], "unknown")
+                    self.assertEqual(res["summary"], text)
+                    self.assertTrue(res["reconciliation"]["unknown"])
+                    advice = " ".join(res["reconciliation"]["next_steps"])
+                    self.assertIn("agy_get", advice)
+                    self.assertIn("agy_history", advice)
+                    result = await self.call("get", task_id=tid, view="result")
+                    self.assertEqual(result["final_message"], text)
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertIsNone(result["stop_reason"])
+                    self.assertFalse(result["evidence_complete"])
+                    events = (await self.call("events", task_id=tid))["events"]
+                    self.assertTrue(any(e["kind"] == e["origin"] == "history" for e in events))
+                    self.assertFalse(any(m.get("method") == "session/prompt" or m.get("event") == "user"
+                                         for m in self.native()[sent:]))
+                    await self.control("send", tid, prompt="continue")
+                    await self.wait_for(tid, "completed", turn_id="turn-2")
+                    await self.control("close", tid)
 
     async def test_stop_reasons_quota_and_no_retry(self):
         for directive, code, state in (("quota", "quota_exhausted", "failed"), ("rate", "rate_limited", "failed"),

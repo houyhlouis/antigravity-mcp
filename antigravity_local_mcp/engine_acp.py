@@ -118,6 +118,10 @@ class Session:
         self.interrupt_timer = None
         self.early = []
 
+    def owns_process(self, pid):
+        process = self.peer.process
+        return process is not None and process.pid == pid and process.returncode is None
+
     def require(self, method):
         if method not in session_capabilities(self.task["capabilities"]):
             raise optional("session/" + method)
@@ -364,9 +368,14 @@ class Session:
         life.waiting(t)
         j.save()
 
-    def cancel_pending(self):
+    def cancel_pending(self, *, force=False):
         for rid, (req, key) in tuple(self.pending.items()):
-            self.peer.write({"id": key, "result": self.cancel_answer(req["kind"] == "permission")})
+            try:
+                self.peer.write({"id": key, "result": self.cancel_answer(req["kind"] == "permission")})
+            except BridgeError as exc:
+                # Closure cancels the local request even if the native pipe has already gone away.
+                if not force or exc.code != "transport_unavailable":
+                    raise
             self.resolve(rid, "cancelled")
 
     def interrupt(self):
@@ -407,6 +416,7 @@ class Session:
 
     async def close(self, reason, *, force=False):
         t, j = self.task, self.journal
+        stop_tree = force and t["status"] in life.LOST
         if not force and t["session_open"]:
             self.require("close")
         self.closing = True
@@ -420,11 +430,11 @@ class Session:
         start = time.monotonic()
         try:
             if self.peer.process and self.peer.process.returncode is None:
-                self.cancel_pending()
-                if t["session_open"] and "close" in session_capabilities(t["capabilities"]):
+                self.cancel_pending(force=stop_tree)
+                if not stop_tree and t["session_open"] and "close" in session_capabilities(t["capabilities"]):
                     await self.peer.request("session/close", {"sessionId": t["session_id"]}, 5)
         finally:
-            await self.peer.close(max(0.1, 15 - (time.monotonic()-start)))
+            await self.peer.close(max(0.1, 15 - (time.monotonic()-start)), force=stop_tree)
             life.closed(t, preserve_interrupted=t["stop_reason"] == reason == "broker_stopped")
             j.save()
             self.service.depart(self)

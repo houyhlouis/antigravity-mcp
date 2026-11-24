@@ -4,16 +4,184 @@ import sys
 import unittest
 from unittest.mock import Mock, patch
 
-from antigravity_local_mcp import authority, platforms, windows
+from antigravity_local_mcp import authority, platforms, prompts, windows
 from antigravity_local_mcp.agy_cli import agy_argv, resolve_agy
 from antigravity_local_mcp.config import load_config
 from antigravity_local_mcp.store import SCHEMA_VERSION
 from antigravity_local_mcp.errors import BridgeError, native_error
+from antigravity_local_mcp.schema import SUPPORTED_KEYWORDS, validate
 from antigravity_local_mcp.security import overlaps, read_project_file, redact, validate_windows_path
 from antigravity_local_mcp.store import Store
 from antigravity_local_mcp.tools import arguments, catalog
 from tests.fake_agy import Fake
-from tests.helpers import FAKE, Files, Harness
+from tests.helpers import FAKE, ROOT, Files, Harness
+
+
+class CatalogTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tools = {t["name"][4:]: t for t in catalog("2025-11-25")}
+
+    def test_audit_probes(self):
+        bad = [
+            # The published schema can express these constraints.
+            ("skills", {}, True, "Supply exactly one of workdir, project_id"),
+            ("skills", {"workdir": "/tmp/mock", "project_id": "p"}, True, "Supply exactly one of workdir, project_id"),
+            ("sessions", {"action": "list"}, True, "Supply exactly one of workdir, project_id"),
+            ("sessions", {"action": "import", "project_id": "p"}, True, "Import needs session_id, request_id and confirm_not_open=true"),
+            ("send", {"task_id": "t", "prompt": "hi", "request_id": "k", "steer": True}, True, "Steering requires expected_turn_id"),
+            ("settings", {"task_id": "t", "request_id": "k"}, True, "Provide at least one setting"),
+            ("start", {"workdir": "/tmp/mock", "prompt": "hi", "request_id": "k", "timeout_seconds": 1}, True,
+             "output_schema and timeout_seconds require headless"),
+            # These tools publish action/view guidance in text and enforce it in arguments().
+            ("worktrees", {"action": "create"}, False, "Missing required field for create"),
+            ("get", {"task_id": "t", "view": "artifact"}, False, "artifact view requires artifact_id"),
+            ("get", {"task_id": "t", "turn_id": "turn-1"}, False, "turn_id applies to result view"),
+            ("projects", {"action": "select"}, False, "List takes paging. Select/create takes path."),
+        ]
+        for name, args, schema_rejects, message in bad:
+            with self.subTest(name=name, args=args):
+                schema = self.tools[name]["inputSchema"]
+                if schema_rejects:
+                    with self.assertRaises(BridgeError):
+                        validate(args, schema)
+                else:
+                    validate(args, schema)
+                with self.assertRaises(BridgeError) as err:
+                    arguments("agy_" + name, args)
+                self.assertEqual((err.exception.code, err.exception.message), ("invalid_arguments", message))
+
+        for name, args, alias in (
+            ("review_request", {"request_id": "r", "pending_request_id": "r"}, "pending_request_id"),
+            ("interrupt", {"task_id": "t", "expected_turn_id": "turn-1", "request_id": "k", "operation_id": "k"}, "operation_id"),
+        ):
+            with self.subTest(name=name):
+                validate(args, self.tools[name]["inputSchema"])
+                self.assertEqual(arguments("agy_" + name, args), {k: v for k, v in args.items() if k != alias})
+
+    def test_documented_calls_and_aliases(self):
+        start = {"prompt": "Run the tests.", "operation_id": "start-1"}
+        send = {"task_id": "t", "prompt": "Continue.", "request_id": "send-1"}
+        for name, args in (
+            ("projects", {"action": "select", "path": "/project"}),
+            ("agents", {}),
+            ("skills", {"workdir": "/project"}),
+            ("skills", {"project_id": "p"}),
+            ("start", {**start, "project_id": "p", "request_id": "start-1"}),
+            ("start", {**start, "worktree": {"repo": "/project", "name": "approach-a"}}),
+            ("start", {**start, "workdir": "/project", "engine": "headless", "timeout_seconds": 600,
+                       "output_schema": {"type": "object"}, "images": []}),
+            ("events", {"task_ids": ["a", "b"], "after": 12, "cursor": 12, "wait_seconds": 25, "view": "outcome"}),
+            ("respond", {"pending_request_id": "r", "response": {"answers": {"q1": "Spaces"}}}),
+            ("get", {"task_id": "t", "view": "result", "turn_id": "turn-1"}),
+            ("get", {"task_id": "t", "view": "artifact", "artifact_id": "a", "offset": 10, "limit": 20}),
+            ("send", send),
+            ("send", {**send, "steer": True, "expected_turn_id": "turn-1"}),
+            ("send", {**send, "steer": False, "expected_turn_id": "turn-1"}),
+            ("settings", {"task_id": "t", "operation_id": "s", "mode": "plan", "model": "session-model", "effort": "high"}),
+            ("resume", {"task_id": "t", "operation_id": "resume-1", "replay_history": True}),
+            ("close", {"task_id": "t", "request_id": "close-1"}),
+            ("sessions", {"action": "list", "project_id": "p"}),
+            ("sessions", {"action": "import", "workdir": "/project", "session_id": "s", "operation_id": "k", "confirm_not_open": True}),
+            ("diff", {"task_id": "t", "turn_id": "turn-1", "format": "stat"}),
+            ("worktrees", {"action": "plan", "name": "tests", "repo": "/project"}),
+            ("worktrees", {"action": "create", "plan_id": "plan", "operation_id": "create-1"}),
+            ("worktrees", {"action": "inspect", "path": "/checkout"}),
+            ("worktrees", {"action": "handoff", "task_id": "t"}),
+            ("worktrees", {"action": "cleanup", "project_id": "p", "request_id": "cleanup-1", "keep_branch": True}),
+        ):
+            with self.subTest(name=name, args=args):
+                validate(args, self.tools[name]["inputSchema"])
+                normalized = arguments("agy_" + name, args)
+                # MCP forwards normalized arguments to the broker, which validates them again.
+                validate(normalized, self.tools[name]["inputSchema"])
+                self.assertEqual(arguments("agy_" + name, normalized), normalized)
+
+    def test_nested_conditions(self):
+        start = {"prompt": "hi", "workdir": "/project"}
+        session = {"action": "import", "project_id": "p", "session_id": "s", "confirm_not_open": True}
+        for name, args in (
+            ("start", start),
+            ("start", {**start, "request_id": "k", "engine": "acp", "output_schema": {"type": "object"}}),
+            ("sessions", session),
+            ("sessions", {**session, "request_id": "k", "confirm_not_open": False}),
+            ("sessions", {"action": "import", "project_id": "p", "request_id": "k", "confirm_not_open": True}),
+            ("sessions", {"action": "list", "workdir": "/project", "operation_id": "k"}),
+        ):
+            with self.subTest(name=name, args=args):
+                with self.assertRaises(BridgeError):
+                    validate(args, self.tools[name]["inputSchema"])
+                with self.assertRaises(BridgeError):
+                    arguments("agy_" + name, args)
+
+    def test_client_compatible_input_schemas(self):
+        def check_keywords(schema):
+            if isinstance(schema, bool):
+                return
+            self.assertFalse(schema.keys() - SUPPORTED_KEYWORDS)
+            for child in schema.get("properties", {}).values():
+                check_keywords(child)
+            for key in ("items", "additionalProperties"):
+                if key in schema:
+                    check_keywords(schema[key])
+            for key in ("anyOf", "oneOf", "allOf"):
+                for child in schema.get(key, []):
+                    check_keywords(child)
+
+        locations = {"start", "skills", "sessions"}
+        keyed = {"send", "interrupt", "settings", "resume", "close"}
+        pending = {"review_request", "respond"}
+        for name, tool in self.tools.items():
+            with self.subTest(name=name):
+                schema = tool["inputSchema"]
+                check_keywords(schema)
+                choices = schema.keys() & {"anyOf", "oneOf"}
+                if name in locations:
+                    self.assertEqual(choices, {"oneOf"})
+                    fields = {"workdir", "project_id", "worktree"} if name == "start" else {"workdir", "project_id"}
+                elif name in keyed | pending:
+                    self.assertEqual(choices, {"anyOf"})
+                    fields = {"request_id", "pending_request_id" if name in pending else "operation_id"}
+                else:
+                    self.assertFalse(choices)
+                for keyword in choices:
+                    self.assertCountEqual(schema[keyword], [{"required": [field]} for field in fields])
+                self.assertEqual("allOf" in schema, name in {"start", "sessions", "settings", "send"})
+                for branch in schema.get("allOf", []):
+                    self.assertTrue(choices)
+                    self.assertNotIn("required", branch)
+
+    def test_allof_rejects_unsupported_keywords_and_preserves_form_dialect(self):
+        with self.assertRaisesRegex(BridgeError, "unsupported form schema"):
+            validate({}, {"allOf": [{}, {"if": {}}]})
+        schema = {"type": "object", "properties": {"q": {"type": "string"}}, "allOf": [{"required": ["q"]}]}
+        validate({"q": "answer"}, schema)
+        with self.assertRaises(BridgeError) as err:
+            authority.answer({"kind": "question", "requestedSchema": schema, "questions": []}, {"content": {"q": "answer"}}, "agent", False)
+        self.assertEqual(err.exception.code, "invalid_response")
+
+    def test_annotation_values(self):
+        expected = {
+            "destructiveHint": "start send respond review_request close worktrees",
+            "readOnlyHint": "status models agents usage skills capabilities events get list requests history diff",
+            "idempotentHint": "status projects models agents usage skills capabilities start send interrupt events get list requests settings resume close history diff",
+            "openWorldHint": "start send resume respond review_request sessions models agents skills usage",
+        }
+        for hint, names in expected.items():
+            with self.subTest(hint=hint):
+                self.assertCountEqual([name for name, tool in self.tools.items() if tool["annotations"][hint]], names.split())
+
+    def test_fixed_setting_choices(self):
+        for name in ("start", "send", "settings"):
+            props = self.tools[name]["inputSchema"]["properties"]
+            self.assertEqual(props["mode"]["enum"], list(prompts.MODES))
+            self.assertEqual(props["effort"]["enum"], list(prompts.EFFORTS))
+            self.assertNotIn("enum", props["model"])
+        for field in ("mode", "effort"):
+            args = {"task_id": "t", "request_id": "k", field: "unknown"}
+            with self.subTest(field=field):
+                with self.assertRaises(BridgeError):
+                    validate(args, self.tools["settings"]["inputSchema"])
 
 
 class ContractTest(unittest.TestCase):
@@ -160,6 +328,25 @@ class StorageTest(Files, unittest.TestCase):
                 load_config(self.path)
         self.assertFalse(load_config().approval_relay)
 
+    def test_config_rejects_tilde_in_path_values(self):
+        for key, value in (("agy_binary", "~/.local/bin/agy"), ("state_dir", "~/state"),
+                           ("worktree_root", "~/worktrees")):
+            with self.subTest(key=key):
+                self.path.write_text(f'{key} = "{value}"\n', encoding="utf-8")
+                with self.assertRaises(BridgeError) as caught:
+                    load_config(self.path)
+                self.assertEqual(caught.exception.code, "invalid_arguments")
+
+    def test_config_expands_tilde_in_filename(self):
+        path = self.path.rename(self.home / "fixture.toml")
+        config = load_config("~/fixture.toml")
+        self.assertEqual(config.path, path)
+        self.assertEqual(config.state_dir, self.config.state_dir)
+
+    def test_example_config_loads(self):
+        self.path.write_bytes((ROOT / "config.example.toml").read_bytes())
+        self.assertEqual(load_config(self.path).path, self.path)
+
     def test_permissions_and_symlink_attachments(self):
         (self.work/"a").write_bytes(b"123")
         if sys.platform != "win32":
@@ -182,6 +369,19 @@ class StorageTest(Files, unittest.TestCase):
 
 
 class EdgeTest(Harness):
+    async def test_invalid_setting_keeps_keyed_refusal(self):
+        for field, message, available in (("mode", "Unknown mode", "available_modes"),
+                                          ("effort", "Unknown thinking level", "available_efforts")):
+            with self.subTest(field=field):
+                call = {"request_id": field, field: "unknown"}
+                with self.assertRaises(BridgeError) as err:
+                    await self.start(**call)
+                self.assertEqual((err.exception.code, err.exception.message), ("invalid_arguments", message))
+                self.assertEqual(err.exception.ids["operation_id"], field)
+                self.assertIn(available, err.exception.extra)
+                with self.assert_code("operation_conflict"):
+                    await self.start(request_id=field)
+
     async def test_catalog_queries_and_status(self):
         status = await self.call("status")
         self.assertEqual(status["compatibility"], "tested")

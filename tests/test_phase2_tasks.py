@@ -220,10 +220,18 @@ class PhaseTwoTaskTests(Harness):
         await self.wait_for(t["task_id"], "completed")
         receipt = await new.call("agy_resume", {"task_id": t["task_id"], "request_id": key(), "replay_history": True})
         self.assertEqual(receipt["engine"], "headless")
-        self.assertEqual(receipt["turn_status"], "completed")
+        self.assertEqual(receipt["turn_status"], "unknown")
+        self.assertTrue(receipt["reconciliation"]["unknown"])
         self.assertEqual(receipt["summary"], "apple\n")
         self.assertFalse(receipt["session_open"])
         self.assertNotIn("session/prompt", [x.get("method") for x in self.native()])
+
+        # The original broker received the terminal result after the snapshot.
+        await self.control("close", t["task_id"])
+        original = await self.control("resume", t["task_id"], replay_history=True)
+        self.assertEqual(original["turn_status"], "completed")
+        self.assertEqual(original["stop_reason"], "end_turn")
+        self.assertEqual(original["reconciliation"]["unknown"], [])
 
     async def test_failed_import_releases_slot_and_ownership(self):
         with self.assert_code("not_found"):

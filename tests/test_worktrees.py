@@ -158,6 +158,73 @@ class GitTests(unittest.TestCase):
         self.git("apply", "--check", "-", data=result["patch"])
         self.refused(self.helper.handoff, target, tip)
 
+    def test_core_excludes_file_and_shared_info_exclude(self):
+        patterns = self.root / "exclude patterns"
+        patterns.write_bytes(b"local-settings.env\n")
+        self.git("config", "--local", "core.excludesFile", str(patterns))
+        target, base = self.create()
+        name = "local-settings.env"
+        content = b"DEMO_VALUE=fixture-\xff\r\n"
+        for checkout in (self.repo, target):
+            (checkout / name).write_bytes(content)
+            self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all", cwd=checkout), b"")
+            self.assertEqual(self.git("check-ignore", "--", name, cwd=checkout).splitlines(), [name.encode()])
+
+        for result in (self.helper.diff(self.repo), self.helper.handoff(target, base)):
+            self.assertEqual(result["files"], [name])
+            self.assertIn(b"+" + content, result["patch"])
+        self.assertEqual(self.helper.inspect(target)["changes"], [{"status": "??", "path": name}])
+        self.refused(self.helper.cleanup, target)
+        self.assertEqual((target / name).read_bytes(), content)
+
+        path = self.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=target)
+        shared_exclude = Path(os.fsdecode(path.rstrip(b"\r\n")))
+        shared_exclude.parent.mkdir(exist_ok=True)
+        shared_exclude.write_bytes(patterns.read_bytes())
+        handoff = self.helper.handoff(target, base)
+        self.assertEqual(handoff["files"], [])
+        self.assertEqual(handoff["patch"], b"")
+        self.assertEqual(self.helper.inspect(target)["changes"], [{"status": "!!", "path": name}])
+
+    def checkout_crlf(self):
+        tracked = self.repo / "file"
+        tracked.write_bytes(b"alpha\nbeta\n")
+        self.git("commit", "-am", "Two LF lines")
+        self.assertEqual(self.git("show", "HEAD:file"), b"alpha\nbeta\n")
+        self.git("config", "--local", "--unset", "core.autocrlf")
+        personal = self.root / "personal.gitconfig"
+        personal.write_bytes(b"[core]\n\tautocrlf = true\n")
+        tracked.unlink()
+        with patch.dict(self.env, GIT_CONFIG_GLOBAL=str(personal), GIT_ATTR_NOSYSTEM="1"):
+            self.git("checkout", "--", "file")
+            self.assertEqual(tracked.read_bytes(), b"alpha\r\nbeta\r\n")
+            self.assertEqual(self.git("status", "--porcelain"), b"")
+        return tracked
+
+    def assert_normalized_crlf_edit(self, tracked):
+        clean = self.helper.diff(self.repo)
+        self.assertEqual(clean["files"], [])
+        self.assertEqual(clean["patch"], b"")
+        tracked.write_bytes(b"alpha\r\nchanged\r\n")
+        edited = self.helper.diff(self.repo)
+        self.assertEqual(edited["files"], [tracked.name])
+        self.assertIn(b"@@ -1,2 +1,2 @@\n alpha\n-beta\n+changed\n", edited["patch"])
+
+    def test_crlf_checkout_with_global_then_repository_autocrlf(self):
+        tracked = self.checkout_crlf()
+        diff = self.helper.diff(self.repo)
+        self.assertEqual(diff["files"], [tracked.name])
+        self.assertIn(b"@@ -1,2 +1,2 @@\n-alpha\n-beta\n+alpha\r\n+beta\r\n", diff["patch"])
+        self.git("config", "--local", "core.autocrlf", "true")
+        self.assert_normalized_crlf_edit(tracked)
+
+    def test_repository_gitattributes_normalize_crlf_checkout(self):
+        tracked = self.checkout_crlf()
+        (self.repo / ".gitattributes").write_bytes(b"file text eol=crlf\n")
+        self.git("add", "--", ".gitattributes")
+        self.git("commit", "-m", "Declare file line endings")
+        self.assert_normalized_crlf_edit(tracked)
+
     def test_diff_plain_repository_deletion_stat_and_cap(self):
         (self.repo / "file").unlink()
         (self.repo / "added").write_bytes(b"new\n" * 200)

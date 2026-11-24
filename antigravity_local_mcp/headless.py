@@ -456,6 +456,10 @@ class HeadlessRun:
     def output_stopped(self):
         return self._stop.is_set()
 
+    def owns_process(self, pid):
+        process = self._process
+        return process is not None and process.pid == pid and process.poll() is None
+
     def start(self) -> int:
         with self._lock:
             if self._process is not None or self._answer is not None:

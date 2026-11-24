@@ -42,8 +42,8 @@ Without `model`, `effort` or `mode`, a task uses your own Antigravity defaults, 
 | `interrupted` | The turn was cancelled (by `agy_interrupt`, `agy_close` or `server.py stop`) |
 | `idle` | The session is open and no turn has run yet (for example after `agy_resume`) |
 | `closed` | The `agy` process was closed; `agy_send` reopens the conversation |
-| `needs_resume` | Contact with `agy` was lost while the task was active; call `agy_resume` |
-| `uncertain` | A reply was lost; inspect before doing anything else |
+| `needs_resume` | Contact with `agy` was lost while the task was active; reconcile with `agy_resume` (see [Recovery](#recovery)) |
+| `uncertain` | A reply from `agy` was lost; inspect first, close an owned session with `agy_close`, then call `agy_resume` |
 | `archived` | Hidden from `agy_list`; `agy_close` with `action: "unarchive"` brings it back |
 
 `activity` is `turn` while a turn runs, `background` while the agent works on its own after a turn, and `none` otherwise.
@@ -82,6 +82,8 @@ When Antigravity's permission rules require approval, for example for a terminal
   It shows the request and asks you to type `allow` or `deny`. Without a terminal it can only deny (`--deny`).
 - To let the main agent approve one-time prompts itself, set `approval_relay = true` in the [settings file](configuration.md). Only you can do that.
 
+`agy_review_request` can show either a permission prompt or a question, and adapts its form to the MCP revision your client negotiated. Clients on MCP `2025-11-25` get the full form (`mode: "form"`, titled choices, multi-select arrays and defaults); clients on `2025-06-18` get a converted form (`enum` and `enumNames` for single choices, including **Allow once** / **Deny**, with flat string, number, integer and boolean fields). If the client does not support form elicitation, uses an older MCP revision (`2024-11-05` or `2025-03-26`), or is on `2025-06-18` and the question cannot be represented there without changing which answers are valid (for example a multi-select question), no form is shown: `agy_review_request` fails with `human_review_required` and the `server.py review REQUEST_ID` command, and the request stays pending without answering or denying anything. Declining, cancelling or timing out on a form returns `answered: false` and also leaves the request pending.
+
 To be asked less often, add allow rules in Antigravity (`/permissions`), start tasks with `mode: "accept-edits"` (file edits in the folder are accepted), or use Antigravity's Auto mode (`mode: "auto"`) where Antigravity offers it.
 
 ## Steering, interrupting and settings
@@ -111,12 +113,14 @@ Two tasks cannot work in the same folder at the same time. To run several tasks 
 
 This creates `/home/me/project.worktrees/approach-a` on a new branch `agy/approach-a` (from `HEAD`, or `base`) and starts the task there. When the task is done:
 
-1. `agy_worktrees` with `action: "handoff"` and the `task_id` stores every change since the base (including new files Git does not ignore, and commits on the branch) as a patch and returns its `artifact_id` and `sha256`.
+1. `agy_worktrees` with `action: "handoff"` and the `task_id` stores every change since the base (including untracked files not ignored by the repository's `.gitignore` files or `info/exclude`, with exact bytes, and commits on the branch) as a patch and returns its `artifact_id` and `sha256`.
 2. `agy_get` with `view: "artifact"` and that `artifact_id` returns the exact patch (base64 for binary content; concatenate the pages before decoding).
 3. Review it, then apply it yourself, for example with `git apply` in the main checkout. The server never merges, pushes or rebases.
 4. `agy_worktrees` with `action: "cleanup"` removes the worktree and its branch, and refuses while anything could be unsaved (use `keep_branch: true` to keep commits).
 
 `agy_worktrees` with `action: "plan"` previews a worktree without creating it, and `inspect` shows its state. Unlike some other agents, Antigravity can usually run `git` inside the worktree itself.
+
+Because the server's Git ignores personal and system Git configuration (including any `core.excludesFile` setting), put machine-local ignore patterns in the repository's shared exclude file (`git rev-parse --git-path info/exclude`; see [security](security.md#the-servers-own-git)) so local-only files do not appear in diffs or handoff patches. Likewise, an inherited `core.autocrlf` setting is not applied: if an existing checkout uses CRLF line endings, configure normalization in the repository itself (`git config core.autocrlf true` inside the repository, or a committed `.gitattributes`; worktrees created by the server are checked out under its own policy).
 
 ## Headless tasks and structured output
 
@@ -146,7 +150,8 @@ The result has `structured_output` matching the schema. Headless mode **cannot a
 
 ## Recovery
 
-- **Lost reply.** Repeat the call with the same `request_id` and arguments; the saved result comes back. A different call with the same key is refused (`operation_conflict`).
-- **Broker restart.** Tasks that were active become `needs_resume`. `agy_resume` reopens the conversation without replaying any prompt and returns a `reconciliation` report. With `replay_history: true` it reloads Antigravity's history into the journal.
+- **Lost reply.** Repeat the call with the same `request_id` and arguments; if the broker finished it, the saved result comes back. A different call with the same key is refused (`operation_conflict`). If the broker lost `agy`'s reply instead, the operation is recorded as `uncertain` (`operation_uncertain` on retry, never repeated automatically) and the task becomes `uncertain`.
+- **Owned `uncertain` session.** While this broker still owns the live `agy` process of an `uncertain` task, `agy_resume`, `agy_send`, `agy_settings` and `agy_interrupt` return `state_conflict` asking you to close the session first. Inspect the task (`agy_get`, `agy_events`), call `agy_close` (`close`, `archive` or `forget`) to stop the owned `agy` process tree, mark pending questions and approvals `cancelled` without answering them and release the folder and live-session slot, and then call `agy_resume` to reopen the conversation without replaying any prompt.
+- **Broker restart and history replay.** Tasks that were active when a broker stopped become `needs_resume`. If an `agy` process from the earlier broker is still alive, wait for it to exit (the server never stops a process it did not start), then call `agy_resume`. It reopens the conversation without replaying any prompt and returns a `reconciliation` report. With `replay_history: true` it reloads Antigravity's history into the journal and restores recovered assistant text into `final_message` (`agy_get` with `view: "result"`) and `summary`, while an interrupted turn's outcome stays `unknown` (`turn_status: "unknown"`, `stop_reason: null`, `evidence_complete: false`) because history carries no stop reason. Turns that had already finished keep their recorded result. Inspect `reconciliation`, `agy_get` and `agy_history` before sending new work.
 - **Existing Antigravity conversations.** `agy_sessions` with `action: "list"` shows the conversations Antigravity has for a folder; `action: "import"` with `confirm_not_open: true` adopts one as a task. Confirm first that it is not open in another `agy` window.
 - **Finding out what happened.** `agy_history` lists the turns, newest first; `agy_events` with `after: 0` replays the whole journal of a task.

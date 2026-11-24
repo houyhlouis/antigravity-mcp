@@ -162,7 +162,7 @@ Antigravity asks before actions that its [permission rules](https://antigravity.
 | You | **Allow** or deny, in your MCP client's prompt (`agy_review_request`) or in a terminal: `python3 server.py review REQUEST_ID` |
 | Antigravity's Auto mode (`mode: "auto"`) | Let Antigravity's own reviewer decide, where Antigravity offers Auto mode |
 
-The main agent can approve only if you set `approval_relay = true` in the [settings file](docs/configuration.md). The server never uses `--dangerously-skip-permissions`. To get fewer prompts, add allow rules in Antigravity (`/permissions`) or use `mode: "accept-edits"`.
+The main agent can approve only if you set `approval_relay = true` in the [settings file](docs/configuration.md). Client review forms follow the client's MCP revision; if a form cannot be shown there (for example a multi-select question on MCP `2025-06-18`), the request stays pending for `server.py review REQUEST_ID`. The server never uses `--dangerously-skip-permissions`. To get fewer prompts, add allow rules in Antigravity (`/permissions`) or use `mode: "accept-edits"`.
 
 ## Terms of use
 
